@@ -1,8 +1,5 @@
 # CAPE Weightor
 
-Cape Arcona Type Foundry
-by Thomas Schostok
-
 ---
 
 ## What it does
@@ -90,5 +87,8 @@ https://github.com/user-attachments/assets/c367bd9e-7c86-4af0-a57a-aab98b38a868
 - `vanilla` (included with Glyphs)
 
 ---
+
+## Code by
+Thomas Schostok
 
 *Cape Arcona Type Foundry — [www.capearcona.com](https://www.capearcona.com)*
