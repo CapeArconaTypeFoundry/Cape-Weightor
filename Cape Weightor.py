@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.000 - 18-May-2026
+# Version 1.001 - 19-May-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
@@ -14,13 +14,13 @@
 import json
 import objc
 import vanilla
-from AppKit import NSClickGestureRecognizer, NSEvent, NSPasteboard, NSPasteboardTypeString, NSScreen, NSTimer
+from AppKit import NSApp, NSClickGestureRecognizer, NSEvent, NSPasteboard, NSPasteboardTypeString, NSScreen, NSTimer
 from Foundation import NSObject, NSPoint
 
 STEP       = 1
 STEP_SHIFT = 5
 WIN_W      = 270
-WIN_H      = 366
+WIN_H      = 390
 
 PREF_PREFIX          = "com.cape.makeMeBolder."
 PREF_VALUE           = PREF_PREFIX + "value"
@@ -31,6 +31,7 @@ PREF_SYNC            = PREF_PREFIX + "syncXY"
 PREF_PRESERVE_H      = PREF_PREFIX + "preserveHeight"
 PREF_STRENGTH        = PREF_PREFIX + "preserveStrength"
 PREF_MOVE_ANCHORS    = PREF_PREFIX + "moveAnchors"
+PREF_ADJ_SB          = PREF_PREFIX + "adjustSidebearings"
 PREF_WIN_POS         = PREF_PREFIX + "winPos"
 
 
@@ -176,14 +177,17 @@ class BolderDialog:
         self.w.move_anchors    = vanilla.CheckBox( (10, 284, 250, 20), "Move anchors with glyph",
                                                    value=True, callback=self._move_anchors_toggled,
                                                    sizeStyle="small")
+        self.w.adjust_sb       = vanilla.CheckBox( (10, 306, 250, 20), "Adjust sidebearings",
+                                                   value=True, callback=self._adjust_sb_toggled,
+                                                   sizeStyle="small")
 
         # ── Copy / Paste parameters ─────────────────────────────────────────
-        self.w.copy_btn  = vanilla.Button( (10,  312, 120, 22), "Copy Parameters",  callback=self._copy_params)
-        self.w.paste_btn = vanilla.Button( (140, 312, 120, 22), "Paste Parameters", callback=self._paste_params)
+        self.w.copy_btn  = vanilla.Button( (10,  334, 120, 22), "Copy Parameters",  callback=self._copy_params)
+        self.w.paste_btn = vanilla.Button( (140, 334, 120, 22), "Paste Parameters", callback=self._paste_params)
 
         # ── Reset / Done ─────────────────────────────────────────────────────
-        self.w.reset = vanilla.Button( (10,  340, 115, 25), "Reset (0)", callback=self._reset)
-        self.w.done  = vanilla.Button( (140, 340, 120, 25), "Apply",      callback=self._done)
+        self.w.reset = vanilla.Button( (10,  362, 115, 25), "Reset (0)", callback=self._reset)
+        self.w.done  = vanilla.Button( (140, 362, 120, 25), "Apply",      callback=self._done)
         self.w.setDefaultButton(self.w.done)
 
         # Restore last-used values before opening
@@ -309,6 +313,10 @@ class BolderDialog:
         if saved_move_anchors is not None:
             self.w.move_anchors.set(bool(saved_move_anchors))
 
+        saved_adj_sb = Glyphs.defaults.get(PREF_ADJ_SB)
+        if saved_adj_sb is not None:
+            self.w.adjust_sb.set(bool(saved_adj_sb))
+
         self._apply()
 
     def _save_prefs(self):
@@ -320,6 +328,7 @@ class BolderDialog:
         Glyphs.defaults[PREF_PRESERVE_H]   = bool(self.w.preserve_h.get())
         Glyphs.defaults[PREF_STRENGTH]     = int(self.w.strength_slider.get())
         Glyphs.defaults[PREF_MOVE_ANCHORS] = bool(self.w.move_anchors.get())
+        Glyphs.defaults[PREF_ADJ_SB]       = bool(self.w.adjust_sb.get())
         nswin = self.w.getNSWindow()
         if nswin:
             o = nswin.frame().origin
@@ -329,13 +338,14 @@ class BolderDialog:
 
     def _copy_params(self, _):
         params = {
-            "value":             self.value,
-            "valueY":            self.value_y,
-            "position":          self.w.pos_field.get(),
-            "keepCompatible":    bool(self.w.cleanup.get()),
-            "preserveHeight":    bool(self.w.preserve_h.get()),
-            "preserveStrength":  int(self.w.strength_slider.get()),
-            "moveAnchors":       bool(self.w.move_anchors.get()),
+            "value":               self.value,
+            "valueY":              self.value_y,
+            "position":            self.w.pos_field.get(),
+            "keepCompatible":      bool(self.w.cleanup.get()),
+            "preserveHeight":      bool(self.w.preserve_h.get()),
+            "preserveStrength":    int(self.w.strength_slider.get()),
+            "moveAnchors":         bool(self.w.move_anchors.get()),
+            "adjustSidebearings":  bool(self.w.adjust_sb.get()),
         }
         pb = NSPasteboard.generalPasteboard()
         pb.clearContents()
@@ -380,6 +390,7 @@ class BolderDialog:
         self.w.strength_field.enable(ph)
 
         self.w.move_anchors.set(bool(params.get("moveAnchors", True)))
+        self.w.adjust_sb.set(bool(params.get("adjustSidebearings", True)))
         self._apply()
         print(f"Parameters pasted: {params}")
 
@@ -508,9 +519,10 @@ class BolderDialog:
                         ty =        ty_full          * strength
                         layer.applyTransform((1, 0, 0, s, 0, ty))
 
-                # Restore sidebearings
-                layer.LSB = data["lsb"]
-                layer.RSB = data["rsb"]
+                # Restore sidebearings (skip when user wants natural OffsetCurve spacing)
+                if self.w.adjust_sb.get():
+                    layer.LSB = data["lsb"]
+                    layer.RSB = data["rsb"]
 
                 # Anchors
                 if self.w.move_anchors.get():
@@ -704,6 +716,9 @@ class BolderDialog:
     def _move_anchors_toggled(self, _):
         self._apply()
 
+    def _adjust_sb_toggled(self, _):
+        self._apply()
+
     def _reset(self, _):
         self.value   = 0
         self.value_y = 0
@@ -755,5 +770,21 @@ class BolderDialog:
         self.w.close()
 
 
-# Store instance to prevent garbage collection
-Glyphs.scriptStorage["_bolderDialog"] = BolderDialog()
+# Bring existing window to front if already running, otherwise start fresh
+_existing_win = None
+for _win in NSApp.windows():
+    try:
+        if _win.isVisible() and (_win.title() or "").startswith("CAPE Weightor"):
+            _existing_win = _win
+            break
+    except Exception:
+        pass
+
+if _existing_win:
+    _existing_win.makeKeyAndOrderFront_(None)
+else:
+    _dialog = BolderDialog()
+    try:
+        Glyphs.scriptStorage["_bolderDialog"] = _dialog
+    except AttributeError:
+        pass
