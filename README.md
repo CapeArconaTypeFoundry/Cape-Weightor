@@ -4,7 +4,7 @@
 
 ## What it does
 
-CAPE Weightor lets you make **selected glyphs bolder or lighter on the fly**, directly in Glyphs. It uses the OffsetCurve filter under the hood to expand or contract outlines, and gives you live feedback as you adjust the values.
+CAPE Weightor lets you make selected glyphs bolder or lighter on the fly, directly in Glyphs. It uses the OffsetCurve filter under the hood to expand or contract outlines, and gives you live feedback as you adjust the values.
 
 You get independent control over two axes:
 
@@ -61,8 +61,13 @@ When checked (default), anchors follow the horizontal expansion of the glyph. Th
 
 Uncheck this if you want anchors to remain completely untouched at their original positions — useful when the automatic X movement doesn't match your expectations for a specific glyph.
 
+### Adjust Sidebearings
+When checked (default), the original LSB and RSB are restored after the offset — the advance width grows with the stroke weight and the sidebearings stay consistent. This is the expected behaviour for most use cases.
+
+When unchecked, sidebearings are not restored and the OffsetCurve filter determines the new LSB and RSB directly. The advance width stays fixed while the outline expands, so the sidebearings shrink. Useful when you want to keep the total advance width constant and adjust spacing manually afterwards.
+
 ### Copy / Paste Parameters
-Use **Copy Parameters** and **Paste Parameters** to transfer settings between sessions or glyphs. All options including **Move Anchors** are included in the copied parameters.
+Use **Copy Parameters** and **Paste Parameters** to transfer settings between sessions or glyphs. All options including **Move Anchors** and **Adjust Sidebearings** are included in the copied parameters.
 
 https://github.com/user-attachments/assets/c367bd9e-7c86-4af0-a57a-aab98b38a868
 
