@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.001 - 19-May-2026
+# Version 1.100 - 25-May-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
-#
-# Adjusts the weight of selected glyphs using the OffsetCurve filter.
-# Supports independent X/Y offsets, outer/inner distribution, and live
-# preview with automatic glyph switching in the edit tab.
+
+__doc__ = """
+Adjusts the weight of selected glyphs using the OffsetCurve filter. Supports independent X/Y offsets, outer/inner distribution, live preview with automatic glyph switching in the edit tab, and an option to preserve the outer width — the left/right edges stay fixed and the added weight grows inward only (pairs with "Preserve glyph height").
+"""
 
 import json
 import objc
@@ -20,7 +20,7 @@ from Foundation import NSObject, NSPoint
 STEP       = 1
 STEP_SHIFT = 5
 WIN_W      = 270
-WIN_H      = 390
+WIN_H      = 412
 
 PREF_PREFIX          = "com.cape.makeMeBolder."
 PREF_VALUE           = PREF_PREFIX + "value"
@@ -32,6 +32,7 @@ PREF_PRESERVE_H      = PREF_PREFIX + "preserveHeight"
 PREF_STRENGTH        = PREF_PREFIX + "preserveStrength"
 PREF_MOVE_ANCHORS    = PREF_PREFIX + "moveAnchors"
 PREF_ADJ_SB          = PREF_PREFIX + "adjustSidebearings"
+PREF_PRESERVE_W      = PREF_PREFIX + "preserveWidth"
 PREF_WIN_POS         = PREF_PREFIX + "winPos"
 
 
@@ -180,14 +181,17 @@ class BolderDialog:
         self.w.adjust_sb       = vanilla.CheckBox( (10, 306, 250, 20), "Adjust sidebearings",
                                                    value=True, callback=self._adjust_sb_toggled,
                                                    sizeStyle="small")
+        self.w.preserve_w      = vanilla.CheckBox( (10, 328, 250, 20), "Preserve outer width (grow inward)",
+                                                   value=False, callback=self._preserve_w_toggled,
+                                                   sizeStyle="small")
 
         # ── Copy / Paste parameters ─────────────────────────────────────────
-        self.w.copy_btn  = vanilla.Button( (10,  334, 120, 22), "Copy Parameters",  callback=self._copy_params)
-        self.w.paste_btn = vanilla.Button( (140, 334, 120, 22), "Paste Parameters", callback=self._paste_params)
+        self.w.copy_btn  = vanilla.Button( (10,  356, 120, 22), "Copy Parameters",  callback=self._copy_params)
+        self.w.paste_btn = vanilla.Button( (140, 356, 120, 22), "Paste Parameters", callback=self._paste_params)
 
         # ── Reset / Done ─────────────────────────────────────────────────────
-        self.w.reset = vanilla.Button( (10,  362, 115, 25), "Reset (0)", callback=self._reset)
-        self.w.done  = vanilla.Button( (140, 362, 120, 25), "Apply",      callback=self._done)
+        self.w.reset = vanilla.Button( (10,  384, 115, 25), "Reset (0)", callback=self._reset)
+        self.w.done  = vanilla.Button( (140, 384, 120, 25), "Apply",      callback=self._done)
         self.w.setDefaultButton(self.w.done)
 
         # Restore last-used values before opening
@@ -317,6 +321,11 @@ class BolderDialog:
         if saved_adj_sb is not None:
             self.w.adjust_sb.set(bool(saved_adj_sb))
 
+        saved_preserve_w = Glyphs.defaults.get(PREF_PRESERVE_W)
+        if saved_preserve_w is not None:
+            self.w.preserve_w.set(bool(saved_preserve_w))
+        self.w.adjust_sb.enable(not bool(self.w.preserve_w.get()))
+
         self._apply()
 
     def _save_prefs(self):
@@ -329,6 +338,7 @@ class BolderDialog:
         Glyphs.defaults[PREF_STRENGTH]     = int(self.w.strength_slider.get())
         Glyphs.defaults[PREF_MOVE_ANCHORS] = bool(self.w.move_anchors.get())
         Glyphs.defaults[PREF_ADJ_SB]       = bool(self.w.adjust_sb.get())
+        Glyphs.defaults[PREF_PRESERVE_W]   = bool(self.w.preserve_w.get())
         nswin = self.w.getNSWindow()
         if nswin:
             o = nswin.frame().origin
@@ -346,6 +356,7 @@ class BolderDialog:
             "preserveStrength":    int(self.w.strength_slider.get()),
             "moveAnchors":         bool(self.w.move_anchors.get()),
             "adjustSidebearings":  bool(self.w.adjust_sb.get()),
+            "preserveWidth":       bool(self.w.preserve_w.get()),
         }
         pb = NSPasteboard.generalPasteboard()
         pb.clearContents()
@@ -391,6 +402,9 @@ class BolderDialog:
 
         self.w.move_anchors.set(bool(params.get("moveAnchors", True)))
         self.w.adjust_sb.set(bool(params.get("adjustSidebearings", True)))
+        pw = bool(params.get("preserveWidth", False))
+        self.w.preserve_w.set(pw)
+        self.w.adjust_sb.enable(not pw)
         self._apply()
         print(f"Parameters pasted: {params}")
 
@@ -412,7 +426,8 @@ class BolderDialog:
                         continue
                     break
 
-            bg = layer.background
+            bg     = layer.background
+            bounds = layer.bounds
             self._orig[layer] = {
                 "paths":        [p.copy() for p in layer.paths],
                 "anchors":      [(a.name, a.position.x, a.position.y) for a in layer.anchors],
@@ -422,6 +437,8 @@ class BolderDialog:
                 "lsb":          layer.LSB,
                 "rsb":          layer.RSB,
                 "width":        layer.width,
+                "bounds_x":     bounds.origin.x,
+                "bounds_w":     bounds.size.width,
                 "bg_paths":     [p.copy() for p in bg.paths] if bg else [],
             }
 
@@ -519,8 +536,18 @@ class BolderDialog:
                         ty =        ty_full          * strength
                         layer.applyTransform((1, 0, 0, s, 0, ty))
 
+                # Preserve outer width: scale the outline back into its original
+                # horizontal bounds so the left/right edges stay pinned and the
+                # added weight grows inward only.
+                if self.w.preserve_w.get() and data["bounds_w"] > 0:
+                    nb = layer.bounds
+                    if nb.size.width > 0:
+                        sx = data["bounds_w"] / nb.size.width
+                        tx = data["bounds_x"] - nb.origin.x * sx
+                        layer.applyTransform((sx, 0, 0, 1, tx, 0))
+                    layer.width = data["width"]
                 # Restore sidebearings (skip when user wants natural OffsetCurve spacing)
-                if self.w.adjust_sb.get():
+                elif self.w.adjust_sb.get():
                     layer.LSB = data["lsb"]
                     layer.RSB = data["rsb"]
 
@@ -717,6 +744,11 @@ class BolderDialog:
         self._apply()
 
     def _adjust_sb_toggled(self, _):
+        self._apply()
+
+    def _preserve_w_toggled(self, _):
+        pw_on = bool(self.w.preserve_w.get())
+        self.w.adjust_sb.enable(not pw_on)
         self._apply()
 
     def _reset(self, _):
