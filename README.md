@@ -15,7 +15,9 @@ You can also control whether the expansion happens more towards the **outer** or
 
 There is an optional **Preserve Height** setting that keeps the overall glyph height constant after the Y offset is applied. It is on by default — disable it when working on purely horizontal glyphs like *minus* or *macron*, where the stroke height and the glyph height are the same thing.
 
-<img width="1658" height="1200" alt="CapeWeightor-Screen01" src="https://github.com/user-attachments/assets/4a0f5822-da33-47cf-9567-9040d497b4e4" />
+A separate **Preserve Outer Width** setting keeps the left and right outer edges pinned in place, so the added weight grows *inward* only — the glyph keeps exactly its current width. Combined with Preserve Height it locks the entire bounding box: an *O* keeps its outer circle while the counter thickens, an *H* keeps its outer verticals while the stems and crossbar fill inward.
+
+<img width="1416" height="1014" alt="capeweightor-v110-Screenshot" src="https://github.com/user-attachments/assets/ee428380-9dee-4693-9639-d6b7442b6a2f" />
 
 ---
 
@@ -66,10 +68,22 @@ When checked (default), the original LSB and RSB are restored after the offset �
 
 When unchecked, sidebearings are not restored and the OffsetCurve filter determines the new LSB and RSB directly. The advance width stays fixed while the outline expands, so the sidebearings shrink. Useful when you want to keep the total advance width constant and adjust spacing manually afterwards.
 
-### Copy / Paste Parameters
-Use **Copy Parameters** and **Paste Parameters** to transfer settings between sessions or glyphs. All options including **Move Anchors** and **Adjust Sidebearings** are included in the copied parameters.
+### Preserve Outer Width
+When checked, the outline is scaled back into its original horizontal bounding box after the offset, so the **left and right outer edges stay exactly where they were** and the added weight grows inward only. The advance width is also kept at its original value. This is different from *Adjust Sidebearings*: that option only changes the metrics, leaving the black outer edges to move outward, whereas this option pins the actual outline.
 
-https://github.com/user-attachments/assets/c367bd9e-7c86-4af0-a57a-aab98b38a868
+Typical results:
+
+- **O** — the outer circle stays fixed, the counter shrinks, the ring gets thicker.
+- **H** — the far-left and far-right verticals stay fixed, the stems and crossbar thicken inward.
+
+Pair it with **Preserve Height** to lock the complete bounding box (horizontal by this option, vertical by Preserve Height). While Preserve Outer Width is on, **Adjust Sidebearings** is greyed out, since the width is already fully controlled here.
+
+**Note:** Because this is a uniform scale back into the original box, the stems end up slightly less thick than a pure offset would make them, and round forms get marginally narrower in proportion. A mathematically clean "inner edges only move, outer stem flanks keep the full offset thickness" is not possible with a uniform offset filter — that would require interpolation between two masters. For the practical goal of "same outer silhouette, more weight inside" the scale-into-box approach is the right tool.
+
+### Copy / Paste Parameters
+Use **Copy Parameters** and **Paste Parameters** to transfer settings between sessions or glyphs. All options including **Move Anchors**, **Adjust Sidebearings** and **Preserve Outer Width** are included in the copied parameters.
+
+https://github.com/user-attachments/assets/6d2fff7c-0d68-4392-b2ed-15ebbf61bb90
 
 ---
 
@@ -79,6 +93,7 @@ https://github.com/user-attachments/assets/c367bd9e-7c86-4af0-a57a-aab98b38a868
 - **Diagonal strokes** (X, K, R, diagonals in general) will change in unexpected ways when using the Y offset, because the OffsetCurve filter offsets along path normals — and diagonals have a horizontal component in their normal direction. Use the **Preserve Height Strength** control to reduce vertical rescaling on diagonal-heavy glyphs and minimise the angular distortion. Note that in italic styles, the diagonal lines tend to slope slightly.
 - **Optical corrections** built into the original design (like overshoots, ink traps, or tapered strokes) won't scale properly. You'll likely need to clean those up by hand.
 - **Anchor X movement** is a proportional approximation based on the bounding box change, not on the glyph's internal stroke structure. Exception: anchors that sit exactly on a path node are snapped back to the exact new position of that node. For all other anchors the movement is an estimate. Disable **Move Anchors** if the automatic placement is not useful for a particular glyph.
+- **Preserve Outer Width** works by scaling the outline back into its original bounding box. This thickens the inside as intended, but stems become slightly thinner than a pure offset and round shapes a touch narrower. It cannot produce a true directional offset (outer flanks fixed at full offset thickness) — that needs master interpolation. On glyphs built only from components it has no visible effect, since components are not offset in the first place.
 - **Components** are not affected — only paths in the active layer are modified.
 - The script works with **Glyphs 3.5+** and **Python 3.11** (Glyphs built-in).
 - For very large offset values, results can get messy. The slider range of ±10 is intentionally conservative — you can type larger values into the input fields, but use with caution.
