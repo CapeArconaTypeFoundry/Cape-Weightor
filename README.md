@@ -6,7 +6,14 @@
 
 CAPE Weightor lets you make selected glyphs bolder or lighter on the fly, directly in Glyphs. It uses the OffsetCurve filter under the hood to expand or contract outlines, and gives you live feedback as you adjust the values.
 
-You get independent control over two axes:
+A **Weight / Width** switch at the top of the window chooses between two modes:
+
+- **Weight** — make glyphs bolder or lighter (the original behaviour, described below).
+- **Width** — condense or expand a glyph horizontally *without changing its weight*: the glyph gets narrower or wider while the vertical stems keep their thickness. See [Width mode](#width-mode).
+
+Only one mode is active at a time. The two pipelines are kept separate on purpose — the intended workflow is sequential (e.g. first set the width, then add weight), not both at once.
+
+In **Weight** mode you get independent control over two axes:
 
 - **X** — expands strokes horizontally, making vertical stems thicker or thinner
 - **Y** — expands strokes vertically, affecting horizontal strokes like crossbars and serifs (the overall glyph height is preserved automatically)
@@ -16,8 +23,6 @@ You can also control whether the expansion happens more towards the **outer** or
 There is an optional **Preserve Height** setting that keeps the overall glyph height constant after the Y offset is applied. It is on by default — disable it when working on purely horizontal glyphs like *minus* or *macron*, where the stroke height and the glyph height are the same thing.
 
 A separate **Preserve Outer Width** setting keeps the left and right outer edges pinned in place, so the added weight grows *inward* only — the glyph keeps exactly its current width. Combined with Preserve Height it locks the entire bounding box: an *O* keeps its outer circle while the counter thickens, an *H* keeps its outer verticals while the stems and crossbar fill inward.
-
-<img width="1416" height="1014" alt="capeweightor-v110-Screenshot" src="https://github.com/user-attachments/assets/ee428380-9dee-4693-9639-d6b7442b6a2f" />
 
 ---
 
@@ -36,13 +41,18 @@ Making a typeface bolder or lighter by hand is tedious. CAPE Weightor is meant t
 1. Open a glyph in the **Edit tab**, or select one or more glyphs in the **Font Overview**
 2. Run the script via the Script menu — all settings from the previous session are restored and immediately applied
 3. Adjust X and Y sliders — changes are applied live
-4. When you're happy, click **Done**
-5. Clicking **Reset (0)** restores the original outlines at any point
+4. When you're happy, click **Apply**
+5. Clicking **Reset** restores the outlines to exactly the state they were in when the script opened — any manual edits made during the session are also undone
 
 **Tip:** Hold **Shift** while clicking `+` / `−` to step in increments of 5 instead of 1.
 
 ### Auto-switch
 While the dialog is open in the Edit tab, you can click on a different glyph and the script will automatically reset the previous glyph and apply the current settings to the new one.
+
+### Manual editing while the dialog is open
+You can move nodes or anchors by hand at any point while the dialog is open. The script detects the change automatically, takes a new baseline snapshot from the edited outline, and resets both sliders to 0. Subsequent adjustments build on your hand-edited version rather than overwriting it.
+
+**Reset** and **Cancel** always restore the true original — the state before the script was opened — regardless of how many manual edits or slider adjustments were made during the session.
 
 ### Sync X and Y
 Enable the **Sync X and Y** checkbox to lock both axes together — handy when you want uniform expansion in all directions.
@@ -80,10 +90,59 @@ Pair it with **Preserve Height** to lock the complete bounding box (horizontal b
 
 **Note:** Because this is a uniform scale back into the original box, the stems end up slightly less thick than a pure offset would make them, and round forms get marginally narrower in proportion. A mathematically clean "inner edges only move, outer stem flanks keep the full offset thickness" is not possible with a uniform offset filter — that would require interpolation between two masters. For the practical goal of "same outer silhouette, more weight inside" the scale-into-box approach is the right tool.
 
-### Copy / Paste Parameters
-Use **Copy Parameters** and **Paste Parameters** to transfer settings between sessions or glyphs. All options including **Move Anchors**, **Adjust Sidebearings** and **Preserve Outer Width** are included in the copied parameters.
+### Keep italic angle (Weight mode)
+On a slanted master, *Preserve glyph height* alone would steepen the italic: the vertical rescale turns `tan α` into `tan α / s_height`, so a 12° italic ends up noticeably steeper after bolding. The **Keep italic angle** checkbox wraps the whole operation — OffsetCurve, *Preserve Height* and *Preserve Outer Width* — in an unslant → work → reslant sandwich. Because the shear is purely horizontal, Y-values are unaffected, so the height math is unchanged. After the reslant the angle is exactly the original value.
 
-https://github.com/user-attachments/assets/6d2fff7c-0d68-4392-b2ed-15ebbf61bb90
+The label shows the master's italic angle from Font Info (e.g. *Keep italic angle (12°)*). On upright masters it reads *(0°)* and is greyed out — there is nothing to compensate, and the behaviour is identical to before. A bonus on italic masters: the OffsetCurve runs on truly vertical/horizontal stems in upright space, which cleans up the small angular residue diagonal-prone italic stems pick up otherwise.
+
+### Copy / Paste Parameters
+Use **Copy Parameters** and **Paste Parameters** to transfer settings between sessions or glyphs. All options — including **Move Anchors**, **Adjust Sidebearings**, **Preserve Outer Width**, the active **mode** and the **Width mode** settings (target width and selected stem) — are included in the copied parameters.
+
+---
+
+## Width mode
+
+Width mode condenses or expands a glyph **horizontally without changing its weight**. A plain horizontal scale would also thin (or thicken) the vertical stems, which *is* a weight change — so the script compensates for it.
+
+How it works:
+
+1. The outline is scaled horizontally to the target width.
+2. The scaling also changed the vertical-stem thickness, so an **X-only OffsetCurve** restores the stems to their nominal value. Because the offset is purely horizontal, **horizontal strokes (crossbars, the bars of E/F) are not touched** — they only need vertical thickness, which the horizontal scale never changed.
+3. Sidebearings are scaled by the same percentage, so the spacing condenses with the glyph, and anchors follow the horizontal change (with node-snapping, just like in Weight mode).
+
+Because the nominal stem value is known in advance, the required scale is solved in a single pass — there is no trial-and-error:
+
+```
+s = (W_target − n) / (W − n)
+offset_per_side = n · (1 − s) / 2
+```
+
+where `W` is the original outline width, `W_target` the target width and `n` the selected vertical stem.
+
+### Stem selector
+The pop-up lists the current master's vertical stems as `name (value)` (e.g. `vStem0 (60)`). Pick the one the compensation should use. If a selected glyph belongs to a different master, that master's value for the same stem is used automatically. If the font defines no vertical stems, the script falls back to a plain horizontal scale — which **will** change the weight; add a stem to the master for proper compensation.
+
+### Target width
+Set the target as a percentage (50–150 %) with the field or slider. Double-click the slider to reset to 100 %, and hold **Shift** while clicking `+` / `−` to step in increments of 5.
+
+### Keep italic angle
+A plain horizontal scale also flattens the slant of an italic: condensing by factor `s` turns the angle `α` into `arctan(s · tan α)` — at 80 % a 12° italic would drop to about 9.6°. The **Keep italic angle** checkbox prevents that. The glyph is unslanted to upright, scaled and stem-compensated there, then re-slanted to the original angle, which keeps the slant exactly constant while the width changes.
+
+The checkbox label shows the master's italic angle straight from Font Info (e.g. *Keep italic angle (12°)*). On upright masters it reads *(0°)* and is greyed out — there is nothing to compensate. When several selected glyphs belong to different masters, each glyph uses its own master's angle. Doing the stem compensation in upright space has a bonus: the X-only offset acts on truly vertical stems, so it is geometrically exact rather than the slight approximation it would be on slanted stems.
+
+### Adjust sidebearings (Width mode)
+By default Width mode scales **LSB** and **RSB** by the same factor as the outline, so the spacing condenses or expands together with the glyph. Enable **Adjust sidebearings** to keep the sidebearings at their **original values** instead — the outline still changes width, but the left and right margins stay exactly where they were. The advance width then changes only by the same amount as the outline (not proportionally to the original advance width). Useful when you want to condense the black shape only, e.g. while keeping a custom-spaced setting intact.
+
+### Per-glyph stem deviation (important)
+Compensation uses **one** stem value for the whole selection — the master's nominal `n`. Real glyphs deviate from that nominal: round glyphs are optically thicker, diagonals and special characters differ. Where a glyph's actual stem `a` differs from `n`, a small residual weight error remains:
+
+```
+weight_error = (1 − s) · (n − a)
+```
+
+If `a = n` the result is exact. If `a > n` the stems end up a little too thin; if `a < n`, a little too thick. The effect grows with larger deviations and more extreme condensing/expansion. Treat the result as a strong starting point and touch up outliers by hand. Glyphs built only from components are scaled but **not** stem-compensated (OffsetCurve does not affect components), so composites will lose a little weight when condensed.
+
+Glyphs that are essentially all stem (`l`, `i`, `|`) are left untouched in Width mode, since they cannot be made narrower without changing their weight.
 
 ---
 
@@ -94,7 +153,8 @@ https://github.com/user-attachments/assets/6d2fff7c-0d68-4392-b2ed-15ebbf61bb90
 - **Optical corrections** built into the original design (like overshoots, ink traps, or tapered strokes) won't scale properly. You'll likely need to clean those up by hand.
 - **Anchor X movement** is a proportional approximation based on the bounding box change, not on the glyph's internal stroke structure. Exception: anchors that sit exactly on a path node are snapped back to the exact new position of that node. For all other anchors the movement is an estimate. Disable **Move Anchors** if the automatic placement is not useful for a particular glyph.
 - **Preserve Outer Width** works by scaling the outline back into its original bounding box. This thickens the inside as intended, but stems become slightly thinner than a pure offset and round shapes a touch narrower. It cannot produce a true directional offset (outer flanks fixed at full offset thickness) — that needs master interpolation. On glyphs built only from components it has no visible effect, since components are not offset in the first place.
-- **Components** are not affected — only paths in the active layer are modified.
+- **Components** are not affected — only paths in the active layer are modified. In **Width mode** components *are* scaled horizontally but cannot be stem-compensated, so composite glyphs lose a little weight when condensed.
+- **Width mode** uses one nominal stem value for the whole selection. Glyphs whose real stem deviates from the master nominal (round shapes, diagonals, special characters) keep a small residual weight error — see [Per-glyph stem deviation](#per-glyph-stem-deviation-important).
 - The script works with **Glyphs 3.5+** and **Python 3.11** (Glyphs built-in).
 - For very large offset values, results can get messy. The slider range of ±10 is intentionally conservative — you can type larger values into the input fields, but use with caution.
 
@@ -108,7 +168,7 @@ https://github.com/user-attachments/assets/6d2fff7c-0d68-4392-b2ed-15ebbf61bb90
 
 ---
 
-## Code by
+## Written by
 Thomas Schostok
 
 *Cape Arcona Type Foundry — [www.capearcona.com](https://www.capearcona.com)*
