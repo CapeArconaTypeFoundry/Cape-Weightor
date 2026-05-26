@@ -26,6 +26,9 @@ A separate **Preserve Outer Width** setting keeps the left and right outer edges
 
 ---
 
+<img width="701" height="549" alt="capeweightor-screenshotv1200" src="https://github.com/user-attachments/assets/da13c748-5d79-4c05-a86c-652c088f38e9" />
+
+
 ## Why this exists
 
 Ideally you'd have a Light and Bold master and just interpolate. But that's not always the case — sometimes you're working on a single-master font, a display face, or something where setting up a whole second master just isn't practical.
@@ -157,6 +160,8 @@ Glyphs that are essentially all stem (`l`, `i`, `|`) are left untouched in Width
 - **Width mode** uses one nominal stem value for the whole selection. Glyphs whose real stem deviates from the master nominal (round shapes, diagonals, special characters) keep a small residual weight error — see [Per-glyph stem deviation](#per-glyph-stem-deviation-important).
 - The script works with **Glyphs 3.5+** and **Python 3.11** (Glyphs built-in).
 - For very large offset values, results can get messy. The slider range of ±10 is intentionally conservative — you can type larger values into the input fields, but use with caution.
+
+https://github.com/user-attachments/assets/538f25c9-c383-4467-b085-938aa477f3f1
 
 ---
 
