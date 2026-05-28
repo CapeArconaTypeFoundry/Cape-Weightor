@@ -29,6 +29,9 @@ A separate **Preserve Outer Width** setting keeps the left and right outer edges
 <img width="701" height="549" alt="capeweightor-screenshotv1200" src="https://github.com/user-attachments/assets/da13c748-5d79-4c05-a86c-652c088f38e9" />
 
 
+
+---
+
 ## Why this exists
 
 Ideally you'd have a Light and Bold master and just interpolate. But that's not always the case — sometimes you're working on a single-master font, a display face, or something where setting up a whole second master just isn't practical.
@@ -59,6 +62,34 @@ You can move nodes or anchors by hand at any point while the dialog is open. The
 
 ### Sync X and Y
 Enable the **Sync X and Y** checkbox to lock both axes together — handy when you want uniform expansion in all directions.
+
+### Weight distribution (Outer / Inner)
+The **Outer / Inner** slider chooses where the added weight ends up. The **total stem growth stays the same** in all cases — only its location moves between the outer silhouette and the inner counter:
+
+- **0 (full Outer)** — all the weight grows *outward*. The outer silhouette gets bigger, the counters stay exactly where they were.
+- **50 (middle, default)** — symmetric: outer and inner edges of every stem each grow by `X`, exactly like a classic OffsetCurve at position 0.5.
+- **100 (full Inner)** — all the weight grows *inward*. The outer silhouette stays put, the counters shrink.
+
+Internally the script classifies each contour as **outer** or **inner (counter)** via even-odd containment, then offsets the two groups separately with `D_outer = 2·X·(1 − p)` and `D_inner = 2·X·p`. Nested counters such as in **B**, **g** or **8** are handled correctly. On glyphs with no counters (`I`, `l`, `|`) the inner share has nothing to act on, so values above `0` simply do less — `100` means no growth at all on those glyphs.
+
+A typographer's tip: values around **30–40** often look better optically than a symmetric **50**, because pushing slightly more weight toward the outer keeps counters readable and prevents the small forms from clogging up at heavy weights.
+
+#### How the classification works (per-contour logic)
+For each path in the layer the script picks a representative point that lies just inside the path's enclosed area, and counts how many *other* paths enclose that point (even-odd nesting). A nesting count of 0, 2, 4… means the path is an *outer*; 1, 3, 5… means it is an *inner counter* (or an outer-within-an-inner, e.g. in `g` or `8`). The two groups are then offset independently and recombined.
+
+Interior points are found by taking the tangent at every on-curve node (from its previous to its next neighbour, handles included for direction) and stepping ±ε along its perpendicular — the side that lies inside the path's bezier is the interior. For **open** contours (e.g. apertures drawn as open paths in some designs of `e`/`a`) a mid-stream on-curve node serves as the reference point instead, and the same containment test decides whether the open path counts as inner or outer.
+
+#### Counters that are part of the outer contour
+The distribution slider operates **per contour**, so it can only redistribute weight between contours that exist as **separate paths** in the layer. A typical `e` is drawn with **one** outer contour (with the lower aperture as an *inward notch* in that single path) plus a separate inner contour for the upper counter. In that case:
+
+- **Slider 0** — outer offsets fully outward; the aperture notch is part of the outer and therefore also moves outward (= the aperture *shrinks*). The upper counter is left alone.
+- **Slider 100** — outer is left alone, so the aperture stays where it was. The upper counter shrinks at full strength.
+
+In other words, an aperture drawn as a notch in the outer follows the outer's share, not the inner's. **If you want the aperture to behave like a real counter under this slider, redraw it as a separate closed inner contour** (CCW direction, like the upper counter). The classification will then pick it up as inner and it will respond to the slider in symmetry with the other counters.
+
+For open inner paths the offset direction is determined by the *path's drawn direction*. If an open inner contour appears to move the wrong way under the slider (counter *grows* at p = 1 instead of shrinking), reverse its direction via **Path → Reverse Contours**.
+
+> ⚠️ The slider re-orders the paths in the layer (outer first, then inner) after the operation. This has no visual effect but can matter for compatibility-locked masters used in interpolation — reorder the paths manually if you need a specific order for compatibility.
 
 ### Preserve Height
 When checked (default), the script rescales the glyph vertically after applying the Y offset so the overall height stays the same. This keeps cap heights and descenders consistent across the font.
