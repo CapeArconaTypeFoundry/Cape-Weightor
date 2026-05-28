@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.200 - 26-May-2026
+# Version 1.201 - 28-May-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
@@ -161,7 +161,7 @@ class BolderDialog:
 
         # ── Weight distribution (outer / inner edge of strokes) ─────────────
         self.w.pos_lbl_l  = vanilla.TextBox(  (10,  225,  35, 14), "Outer", sizeStyle="small")
-        self.w.pos_slider = vanilla.Slider(   (48,  224, 118, 18), minValue=0, maxValue=97, value=50,
+        self.w.pos_slider = vanilla.Slider(   (48,  224, 118, 18), minValue=0, maxValue=100, value=50,
                                               callback=self._pos_changed)
         self.w.pos_field  = vanilla.EditText( (170, 221,  42, 22), "50",
                                               callback=self._pos_field_changed)
@@ -1010,6 +1010,217 @@ class BolderDialog:
         self._path_sig = self._compute_path_sig(self.layers)
         print(f"Width: {self.width_pct:.0f}%  (scale {f:.3f})  keep_italic={keep_ital}")
 
+    # ── Contour classification + distributed offset ──────────────────────────
+
+    def _is_off_curve(self, node):
+        """Robust off-curve detection across Glyphs versions."""
+        try:
+            t = node.type
+        except Exception:
+            return False
+        try:
+            if t == GSOFFCURVE:
+                return True
+        except NameError:
+            pass
+        try:
+            return str(t).lower() == "offcurve"
+        except Exception:
+            return False
+
+    def _path_is_closed(self, path):
+        """Return True if the path is closed, False if open. Falls back to a
+        first/last-node coincidence test on Glyphs builds that don't expose
+        the .closed attribute."""
+        try:
+            return bool(path.closed)
+        except AttributeError:
+            pass
+        try:
+            nodes = list(path.nodes)
+            if len(nodes) < 2:
+                return False
+            a, b = nodes[0].position, nodes[-1].position
+            return abs(a.x - b.x) < 0.01 and abs(a.y - b.y) < 0.01
+        except Exception:
+            return True
+
+    def _inside_point_for_path(self, path):
+        """Return an NSPoint usable as a *classification reference* for this
+        path, or None if no useful point can be found.
+
+        For **closed** paths the point lies inside the enclosed area (strategy
+        below). For **open** paths there is no enclosure, but we still need to
+        decide whether the path sits inside another (closed) contour — so we
+        return a point ON the path itself (a mid-stream on-curve node). The
+        nesting test in `_classify_contours` then checks how many OTHER paths
+        enclose this point.
+
+        Closed-path strategy: for every on-curve node, take the tangent from
+        its previous to its next neighbour (those may be off-curve handles,
+        which is fine for the direction) and step ±ε along its perpendicular.
+        The side that lands inside the path's bezierPath is the interior side.
+        This avoids two traps the simpler "edge midpoint" approach falls into
+        for ring shapes such as an O:
+          • chord midpoints between an anchor and its tangent handle lie
+            *outside* the curve;
+          • a bbox-centre fallback lands in the counter, inside the *inner*
+            contour, which would flip the classification.
+        """
+        bp = path.bezierPath
+        if bp is None:
+            return None
+        nodes = list(path.nodes)
+        n = len(nodes)
+        if n < 2:
+            return None
+
+        # Open paths: take a midway on-curve node as the reference point.
+        if not self._path_is_closed(path):
+            on_curve = [nn for nn in nodes if not self._is_off_curve(nn)]
+            picks = on_curve if on_curve else nodes
+            mid = picks[len(picks) // 2]
+            return NSPoint(mid.position.x, mid.position.y)
+
+        # Closed paths: tangent + perpendicular ε offset, both directions.
+        eps = 1.0
+        for i, node in enumerate(nodes):
+            if self._is_off_curve(node):
+                continue
+            prev_n = nodes[(i - 1) % n]
+            next_n = nodes[(i + 1) % n]
+            dx = next_n.position.x - prev_n.position.x
+            dy = next_n.position.y - prev_n.position.y
+            L = (dx * dx + dy * dy) ** 0.5
+            if L < 1e-6:
+                continue
+            # Perpendicular unit vector
+            px, py = -dy / L, dx / L
+            nx, ny = node.position.x, node.position.y
+            for sign in (1.0, -1.0):
+                cand = NSPoint(nx + sign * eps * px, ny + sign * eps * py)
+                try:
+                    if bp.containsPoint_(cand):
+                        return cand
+                except Exception:
+                    pass
+
+        # No bbox-centre fallback on purpose — for ring-shaped outers it would
+        # land inside a counter and flip the classification. Returning None
+        # makes the caller treat this path as outer (safe default).
+        return None
+
+    def _classify_contours(self, layer):
+        """Return (outer_paths, inner_paths) using even-odd containment.
+        A path is INNER iff an odd number of *other* paths enclose its interior."""
+        paths = list(layer.paths)
+        if not paths:
+            return [], []
+
+        inside_pts = [self._inside_point_for_path(p) for p in paths]
+        bezier_ps  = []
+        for p in paths:
+            try:
+                bezier_ps.append(p.bezierPath)
+            except Exception:
+                bezier_ps.append(None)
+
+        outer, inner = [], []
+        for i, path in enumerate(paths):
+            point = inside_pts[i]
+            if point is None:
+                # Classification failed → treat as outer (safe default, matches
+                # the pre-distribution behaviour for this path).
+                outer.append(path)
+                continue
+            nesting = 0
+            for j, other_bp in enumerate(bezier_ps):
+                if j == i or other_bp is None:
+                    continue
+                try:
+                    if other_bp.containsPoint_(point):
+                        nesting += 1
+                except Exception:
+                    pass
+            if nesting % 2 == 0:
+                outer.append(path)
+            else:
+                inner.append(path)
+        return outer, inner
+
+    def _offset_layer_distributed(self, layer, offset_x, offset_y, keep, p):
+        """Apply OffsetCurve with true outer / inner distribution.
+
+        p = 0   → all weight on outer (silhouette grows, counters unchanged)
+        p = 0.5 → symmetric (== classic OffsetCurve with position 0.5)
+        p = 1   → all weight on inner (silhouette unchanged, counters shrink)
+
+        Total stem growth stays at 2·offset regardless of p.
+        """
+        if abs(offset_x) < 1e-6 and abs(offset_y) < 1e-6:
+            return True
+        if not list(layer.paths):
+            return True
+
+        outer_paths, inner_paths = self._classify_contours(layer)
+        outer_originals = [pp.copy() for pp in outer_paths]
+        inner_originals = [pp.copy() for pp in inner_paths]
+
+        # Per-group offsets. The doubling makes the sum equal 2·offset at any p,
+        # matching the per-side movement OffsetCurve produces at position 0.5.
+        f_outer = 2.0 * (1.0 - p)
+        f_inner = 2.0 * p
+
+        OffsetCurve = objc.lookUpClass("GlyphsFilterOffsetCurve")
+
+        def _do_offset(ox, oy):
+            try:
+                OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_autoStroke_position_metrics_error_shadow_capStyleStart_capStyleEnd_keepCompatibleOutlines_(
+                    layer, ox, oy,
+                    False, False, 0.5, None, None, None, 0, 0, keep
+                )
+                return True
+            except AttributeError:
+                pass
+            try:
+                OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_position_(
+                    layer, ox, oy, False, 0.5
+                )
+                return True
+            except Exception as e:
+                print(f"Offset error ({layer.parent.name}): {e}")
+                return False
+
+        def _process(originals, fx, fy):
+            """Replace layer.paths with `originals`, offset, return copies of the result."""
+            for pp in list(layer.paths):
+                layer.shapes.remove(pp)
+            if not originals:
+                return []
+            for pp in originals:
+                layer.shapes.append(pp.copy())
+            if abs(fx) > 1e-6 or abs(fy) > 1e-6:
+                if not _do_offset(fx, fy):
+                    return None  # signals failure
+            return [pp.copy() for pp in layer.paths]
+
+        offset_outer = _process(outer_originals, offset_x * f_outer, offset_y * f_outer)
+        if offset_outer is None:
+            return False
+        offset_inner = _process(inner_originals, offset_x * f_inner, offset_y * f_inner)
+        if offset_inner is None:
+            return False
+
+        # Combine: outer first, then inner. Original interleaved order is not
+        # strictly preserved — acceptable for live preview; document the caveat.
+        for pp in list(layer.paths):
+            layer.shapes.remove(pp)
+        for pp in offset_outer:
+            layer.shapes.append(pp.copy())
+        for pp in offset_inner:
+            layer.shapes.append(pp.copy())
+        return True
+
     # ── Bold logic ─────────────────────────────────────────────────────────
 
     def _apply_weight(self):
@@ -1019,11 +1230,10 @@ class BolderDialog:
             self._path_sig = self._compute_path_sig(self.layers)
             return
 
-        OffsetCurve = objc.lookUpClass("GlyphsFilterOffsetCurve")
         keep      = bool(self.w.cleanup.get())
         keep_ital = bool(self.w.weight_italic.get())
         try:
-            pos = max(0.01, float(self.w.pos_field.get()) / 100.0)
+            pos = max(0.0, min(1.0, float(self.w.pos_field.get()) / 100.0))
         except ValueError:
             pos = 0.5
 
@@ -1051,27 +1261,11 @@ class BolderDialog:
                 orig_w = up_bounds.size.width
                 orig_h = up_bounds.size.height
 
-                applied = False
-                try:
-                    OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_autoStroke_position_metrics_error_shadow_capStyleStart_capStyleEnd_keepCompatibleOutlines_(
-                        layer, self.value, self.value_y,
-                        False, False, pos, None, None, None, 0, 0, keep
-                    )
-                    applied = True
-                except AttributeError:
-                    pass
-
-                if not applied:
-                    try:
-                        OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_position_(
-                            layer, self.value, self.value_y, False, pos
-                        )
-                        applied = True
-                    except Exception as e:
-                        print(f"Offset error ({layer.parent.name}): {e}")
-                        if t:
-                            layer.applyTransform((1, 0, t, 1, 0, 0))  # reslant before bailing
-                        continue
+                ok = self._offset_layer_distributed(layer, self.value, self.value_y, keep, pos)
+                if not ok:
+                    if t:
+                        layer.applyTransform((1, 0, t, 1, 0, 0))  # reslant before bailing
+                    continue
 
                 # Rescale vertically to preserve original height (upright Y unchanged
                 # by the shear, so the math is identical with or without italic).
