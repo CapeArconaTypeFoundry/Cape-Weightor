@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.201 - 28-May-2026
+# Version 1.202 - 01-Jun-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
@@ -864,6 +864,75 @@ class BolderDialog:
             g.name = name or ""
             layer.guides.append(g)
 
+    # ── Background protection (images + paths in the Cmd+B layer) ───────────
+    # Two cascade effects need to be neutralised so the Glyphs "background"
+    # layer (toggle with Cmd+B) stays exactly as the designer left it:
+    #   1. Reference images — `GSLayer.applyTransform()` transforms every
+    #      element of the layer, including `layer.backgroundImage` AND
+    #      `layer.background.backgroundImage`. We snapshot/restore the affine
+    #      transform of both.
+    #   2. Background paths — in some Glyphs versions `layer.LSB / RSB /
+    #      width` setters and `applyTransform` shift the paths of the
+    #      background layer on X alongside the foreground. The path geometry
+    #      stays intact, but the whole path translates. We restore them from
+    #      the captured snapshot at the end of every per-layer pass.
+
+    def _snapshot_background_image(self, layer):
+        state = {}
+        try:
+            img = layer.backgroundImage
+            if img is not None:
+                state["fg"] = img.transform
+        except Exception:
+            pass
+        try:
+            bg = layer.background
+            if bg is not None:
+                bg_img = bg.backgroundImage
+                if bg_img is not None:
+                    state["bg"] = bg_img.transform
+        except Exception:
+            pass
+        return state if state else None
+
+    def _restore_background_image(self, layer, state):
+        if not state:
+            return
+        if "fg" in state:
+            try:
+                img = layer.backgroundImage
+                if img is not None:
+                    img.transform = state["fg"]
+            except Exception:
+                pass
+        if "bg" in state:
+            try:
+                bg = layer.background
+                if bg is not None:
+                    bg_img = bg.backgroundImage
+                    if bg_img is not None:
+                        bg_img.transform = state["bg"]
+            except Exception:
+                pass
+
+    def _restore_bg_paths(self, layer, data):
+        """Re-seat the background layer's paths from their captured snapshot.
+        Foreground LSB/RSB/width setters and applyTransform calls can cascade
+        and translate background paths on X even when their geometry isn't
+        modified — this puts them back where they were at snapshot time."""
+        if not data.get("bg_paths"):
+            return
+        try:
+            bg = layer.background
+            if bg is None:
+                return
+            for p in list(bg.paths):
+                bg.shapes.remove(p)
+            for p in data["bg_paths"]:
+                bg.shapes.append(p.copy())
+        except Exception:
+            pass
+
     # ── Apply (dispatch by mode) ─────────────────────────────────────────────
 
     def _apply(self):
@@ -917,94 +986,98 @@ class BolderDialog:
 
         for layer in self.layers:
             data = self._orig[layer]
+            img_state = self._snapshot_background_image(layer)
+            try:
+                # Italic slant of this layer's master (0 when disabled / upright).
+                angle = self._italic_angle(self._resolve_master(layer)) if keep_ital else 0.0
+                t     = math.tan(math.radians(angle)) if abs(angle) > 1e-6 else 0.0
 
-            # Italic slant of this layer's master (0 when disabled / upright).
-            angle = self._italic_angle(self._resolve_master(layer)) if keep_ital else 0.0
-            t     = math.tan(math.radians(angle)) if abs(angle) > 1e-6 else 0.0
+                # Original (slanted) bbox — reference for anchor placement.
+                sl_bounds = layer.bounds
+                osl_x = sl_bounds.origin.x
+                osl_w = sl_bounds.size.width
 
-            # Original (slanted) bbox — reference for anchor placement.
-            sl_bounds = layer.bounds
-            osl_x = sl_bounds.origin.x
-            osl_w = sl_bounds.size.width
+                # 0. Unslant to the upright coordinate system (identity when t == 0).
+                #    Scaling + stem compensation happen on truly vertical stems, which
+                #    keeps the offset geometrically clean and the slant angle intact.
+                if t:
+                    layer.applyTransform((1, 0, -t, 1, 0, 0))
 
-            # 0. Unslant to the upright coordinate system (identity when t == 0).
-            #    Scaling + stem compensation happen on truly vertical stems, which
-            #    keeps the offset geometrically clean and the slant angle intact.
-            if t:
-                layer.applyTransform((1, 0, -t, 1, 0, 0))
+                up_bounds = layer.bounds
+                up_x = up_bounds.origin.x
+                up_w = up_bounds.size.width
 
-            up_bounds = layer.bounds
-            up_x = up_bounds.origin.x
-            up_w = up_bounds.size.width
+                n = self._stem_value_for_layer(layer, self.width_stem_idx) \
+                    if self.width_stem_idx is not None else 0.0
 
-            n = self._stem_value_for_layer(layer, self.width_stem_idx) \
-                if self.width_stem_idx is not None else 0.0
+                do_scale        = up_w > 0
+                s               = 1.0
+                offset_per_side = 0.0
+                if do_scale:
+                    W        = up_w
+                    W_target = W * f
+                    if n <= 0:
+                        # No usable stem reference → plain scale (weight will change).
+                        s = f
+                    elif (W - n) > 0:
+                        # Closed form: after stem compensation the outer width is
+                        # exactly W_target and the vertical stem is restored to n.
+                        s = (W_target - n) / (W - n)
+                        if s < 0.05:
+                            s = 0.05  # guard near-all-stem glyphs from collapsing
+                        offset_per_side = n * (1.0 - s) / 2.0
+                    else:
+                        # Essentially all stem (l, i, |) — cannot narrow without
+                        # changing weight; leave untouched (still reslant below).
+                        do_scale = False
 
-            do_scale        = up_w > 0
-            s               = 1.0
-            offset_per_side = 0.0
-            if do_scale:
-                W        = up_w
-                W_target = W * f
-                if n <= 0:
-                    # No usable stem reference → plain scale (weight will change).
-                    s = f
-                elif (W - n) > 0:
-                    # Closed form: after stem compensation the outer width is
-                    # exactly W_target and the vertical stem is restored to n.
-                    s = (W_target - n) / (W - n)
-                    if s < 0.05:
-                        s = 0.05  # guard near-all-stem glyphs from collapsing
-                    offset_per_side = n * (1.0 - s) / 2.0
-                else:
-                    # Essentially all stem (l, i, |) — cannot narrow without
-                    # changing weight; leave untouched (still reslant below).
-                    do_scale = False
+                if do_scale:
+                    # 1. Horizontal scale, upright left edge pinned
+                    tx = up_x * (1.0 - s)
+                    layer.applyTransform((s, 0, 0, 1, tx, 0))
 
-            if do_scale:
-                # 1. Horizontal scale, upright left edge pinned
-                tx = up_x * (1.0 - s)
-                layer.applyTransform((s, 0, 0, 1, tx, 0))
-
-                # 2. Restore vertical-stem thickness with an X-only offset.
-                #    offsetY = 0 leaves horizontal stems (crossbars) untouched.
-                if abs(offset_per_side) > 1e-6:
-                    applied = False
-                    try:
-                        OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_autoStroke_position_metrics_error_shadow_capStyleStart_capStyleEnd_keepCompatibleOutlines_(
-                            layer, offset_per_side, 0.0,
-                            False, False, 0.5, None, None, None, 0, 0, keep
-                        )
-                        applied = True
-                    except AttributeError:
-                        pass
-                    if not applied:
+                    # 2. Restore vertical-stem thickness with an X-only offset.
+                    #    offsetY = 0 leaves horizontal stems (crossbars) untouched.
+                    if abs(offset_per_side) > 1e-6:
+                        applied = False
                         try:
-                            OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_position_(
-                                layer, offset_per_side, 0.0, False, 0.5
+                            OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_autoStroke_position_metrics_error_shadow_capStyleStart_capStyleEnd_keepCompatibleOutlines_(
+                                layer, offset_per_side, 0.0,
+                                False, False, 0.5, None, None, None, 0, 0, keep
                             )
-                        except Exception as e:
-                            print(f"Width offset error ({layer.parent.name}): {e}")
+                            applied = True
+                        except AttributeError:
+                            pass
+                        if not applied:
+                            try:
+                                OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_position_(
+                                    layer, offset_per_side, 0.0, False, 0.5
+                                )
+                            except Exception as e:
+                                print(f"Width offset error ({layer.parent.name}): {e}")
 
-            # 3. Reslant back to the original italic angle (identity when t == 0).
-            if t:
-                layer.applyTransform((1, 0, t, 1, 0, 0))
+                # 3. Reslant back to the original italic angle (identity when t == 0).
+                if t:
+                    layer.applyTransform((1, 0, t, 1, 0, 0))
 
-            if do_scale:
-                # 4. Sidebearings
-                if self.w.wmode_adj_sb.get():
-                    # Keep LSB and RSB at their original values — only the outline
-                    # condenses/expands, spacing stays where it was.
-                    layer.LSB = data["lsb"]
-                    layer.RSB = data["rsb"]
-                else:
-                    # Default: scale spacing with the glyph
-                    layer.LSB = data["lsb"] * f
-                    layer.RSB = data["rsb"] * f
+                if do_scale:
+                    # 4. Sidebearings
+                    if self.w.wmode_adj_sb.get():
+                        # Keep LSB and RSB at their original values — only the outline
+                        # condenses/expands, spacing stays where it was.
+                        layer.LSB = data["lsb"]
+                        layer.RSB = data["rsb"]
+                    else:
+                        # Default: scale spacing with the glyph
+                        layer.LSB = data["lsb"] * f
+                        layer.RSB = data["rsb"] * f
 
-            # 5. Anchors follow the horizontal change; guides restored
-            self._place_anchors(layer, data, osl_x, osl_w)
-            self._restore_guides(layer)
+                # 5. Anchors follow the horizontal change; guides restored
+                self._place_anchors(layer, data, osl_x, osl_w)
+                self._restore_guides(layer)
+            finally:
+                self._restore_background_image(layer, img_state)
+                self._restore_bg_paths(layer, data)
 
         self._redraw()
         self._path_sig = self._compute_path_sig(self.layers)
@@ -1238,8 +1311,9 @@ class BolderDialog:
             pos = 0.5
 
         for layer in self.layers:
-                data = self._orig[layer]
-
+            data = self._orig[layer]
+            img_state = self._snapshot_background_image(layer)
+            try:
                 # Italic slant of this layer's master (0 when disabled / upright).
                 angle = self._italic_angle(self._resolve_master(layer)) if keep_ital else 0.0
                 t     = math.tan(math.radians(angle)) if abs(angle) > 1e-6 else 0.0
@@ -1306,6 +1380,9 @@ class BolderDialog:
                 # Anchors + guides (use slanted reference bbox)
                 self._place_anchors(layer, data, osl_x, osl_w)
                 self._restore_guides(layer)
+            finally:
+                self._restore_background_image(layer, img_state)
+                self._restore_bg_paths(layer, data)
 
         self._redraw()
         self._path_sig = self._compute_path_sig(self.layers)
