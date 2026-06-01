@@ -1,6 +1,14 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v1.202] - 2026-06-01
+### Fixed
+- **Background layer (Cmd+B) stays put — images *and* paths.** Two cascade effects neutralised in one `try / finally` block per layer:
+  - **Reference images.** `GSLayer.applyTransform()` transforms every element of the layer, including reference images. The script now snapshots the affine transforms of both `layer.backgroundImage` *and* `layer.background.backgroundImage` and restores them after each per-layer pass.
+  - **Background paths.** In some Glyphs versions `layer.LSB / RSB / width` setters and `applyTransform` translate the *paths* of the background layer on the X axis along with the foreground (their geometry is untouched, but the whole path moves). The script now re-seats the background paths from the captured snapshot in the same `finally`, so paths on the Cmd+B layer never drift even after dozens of slider changes.
+### Internal
+- Normalised the inconsistent 8-space indent inside the `_apply_weight` per-layer loop to the standard 4-space step. Purely cosmetic, no behavioural change.
+
 ## [v1.201] - 2026-05-28
 ### Fixed
 - **Outer/Inner contour classification** — the heuristic that decides which paths in a layer are *outer* and which are *inner counters* was rewritten:
