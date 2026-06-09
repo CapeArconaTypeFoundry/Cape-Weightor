@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.202 - 01-Jun-2026
+# Version 1.203 - 09-Jun-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
@@ -211,15 +211,6 @@ class BolderDialog:
 
         # ── Width mode controls (shown only in Width mode) ───────────────────
         first_master = self._resolve_master(self.layers[0])
-        # Diagnostic: dump what the font/master actually expose for stems
-        try:
-            print("CAPE Weightor — font.stems:",
-                  [(i, m.name, bool(m.horizontal)) for i, m in enumerate(self.font.stems)])
-            print("CAPE Weightor — master.stems:",
-                  list(first_master.stems) if first_master else None,
-                  "| master:", first_master.name if first_master else None)
-        except Exception as e:
-            print(f"CAPE Weightor — stem dump failed: {e}")
 
         stem_items = []
         for gidx, sname in self._vstem_list:
@@ -337,7 +328,8 @@ class BolderDialog:
         )
 
     def _compute_path_sig(self, layers):
-        """Fingerprint of all node and anchor positions — used to detect manual edits."""
+        """Fingerprint of node, anchor and component positions — used to detect manual edits.
+        Components are included so that moving a component by hand also resets the baseline."""
         parts = []
         for l in layers:
             try:
@@ -348,9 +340,24 @@ class BolderDialog:
                 for a in l.anchors:
                     parts.append(int(round(a.position.x)))
                     parts.append(int(round(a.position.y)))
+                for c in l.components:
+                    try:
+                        tf = tuple(c.transform)
+                        parts.append(c.componentName or "")
+                        parts.extend(int(round(v * 1000)) for v in tf)
+                    except Exception:
+                        pass
             except Exception:
                 pass
         return hash(tuple(parts))
+
+    def _key(self, layer):
+        """Stable backup-dict key — survives Glyphs handing us a fresh ObjC pointer
+        for the same logical layer (e.g. when switching glyphs and back)."""
+        try:
+            return (layer.parent.name, layer.associatedMasterId)
+        except Exception:
+            return (id(layer), None)
 
     def _check_manual_edit(self):
         """If the user moved nodes by hand, adopt the current outline as the new
@@ -781,7 +788,7 @@ class BolderDialog:
     # ── Data backup ────────────────────────────────────────────────────────
 
     def _capture_layer(self, layer):
-        """Snapshot a single layer's outlines, metrics, anchors and guides."""
+        """Snapshot a single layer's outlines, metrics, anchors, guides and components."""
         # Detect which anchors sit exactly on a node (path_idx, node_idx)
         anchor_nodes = {}
         for anchor in layer.anchors:
@@ -795,6 +802,20 @@ class BolderDialog:
                     continue
                 break
 
+        # Capture component transforms by index. We capture the transform tuple
+        # directly so it survives applyTransform side effects on the live
+        # component object.
+        components = []
+        try:
+            for c in layer.components:
+                try:
+                    tf = tuple(c.transform)
+                except Exception:
+                    tf = None
+                components.append((c.componentName, tf))
+        except Exception:
+            pass
+
         bg     = layer.background
         bounds = layer.bounds
         return {
@@ -803,6 +824,7 @@ class BolderDialog:
             "anchor_nodes": anchor_nodes,
             "guides":       [(g.position.x, g.position.y, g.angle, g.name)
                              for g in layer.guides],
+            "components":   components,
             "lsb":          layer.LSB,
             "rsb":          layer.RSB,
             "width":        layer.width,
@@ -814,18 +836,24 @@ class BolderDialog:
     def _save(self):
         self._orig = {}
         for layer in self.layers:
-            self._orig[layer] = self._capture_layer(layer)
-            # Capture the pristine original only once per layer — this is the
-            # state Reset and Cancel restore to, regardless of later snapshots.
-            if layer not in self._pristine:
-                self._pristine[layer] = self._capture_layer(layer)
+            k = self._key(layer)
+            self._orig[k] = self._capture_layer(layer)
+            # Capture the pristine original only once per (glyph, master) — this
+            # is the state Reset and Cancel restore to, regardless of later
+            # snapshots. Keyed by a stable tuple so that re-selecting the same
+            # logical layer (Glyphs may hand back a fresh ObjC pointer) keeps
+            # the *original* pristine, not a re-snapshot of an already-modified
+            # working state.
+            if k not in self._pristine:
+                self._pristine[k] = self._capture_layer(layer)
 
     def _restore(self, source=None):
         src = source if source is not None else self._orig
         for layer in self.layers:
-            if layer not in src:
+            k = self._key(layer)
+            if k not in src:
                 continue
-            data = src[layer]
+            data = src[k]
             for path in list(layer.paths):
                 layer.shapes.remove(path)
             for p in data["paths"]:
@@ -833,6 +861,7 @@ class BolderDialog:
             layer.width = data["width"]
             self._restore_anchors(layer, src)
             self._restore_guides(layer, src)
+            self._restore_components(layer, data)
             bg = layer.background
             if bg and data["bg_paths"]:
                 for path in list(bg.paths):
@@ -845,7 +874,7 @@ class BolderDialog:
         self._restore(self._pristine)
 
     def _restore_anchors(self, layer, source=None):
-        data = (source if source is not None else self._orig)[layer]
+        data = (source if source is not None else self._orig)[self._key(layer)]
         layer.anchors = []
         for name, x, y in data["anchors"]:
             a = GSAnchor()
@@ -855,7 +884,7 @@ class BolderDialog:
             layer.anchors.append(a)
 
     def _restore_guides(self, layer, source=None):
-        data = (source if source is not None else self._orig)[layer]
+        data = (source if source is not None else self._orig)[self._key(layer)]
         layer.guides = []
         for x, y, angle, name in data["guides"]:
             g = GSGuide()
@@ -863,6 +892,43 @@ class BolderDialog:
             g.angle = angle
             g.name = name or ""
             layer.guides.append(g)
+
+    def _restore_components(self, layer, data):
+        """Restore the captured transforms on the layer's components.
+        Components are **never** modified by Weightor — neither in Weight nor in
+        Width mode. The `applyTransform` calls used in both pipelines cascade
+        onto the components though (they live on the same layer and applyTransform
+        touches every element), so we re-seat them from the snapshot after each
+        per-layer pass. This is the same pattern used for background paths.
+
+        Why this is correct in *both* modes:
+          • Weight mode adds weight via OffsetCurve, which only operates on outline
+            paths — components would not get any weight added. Letting applyTransform
+            stretch/shift them while OffsetCurve ignores them would produce broken
+            composites. The right answer is to leave them entirely alone and let the
+            user run the script on the base glyphs (the composites pick up the
+            change automatically through their references).
+          • Width mode condenses the outline and restores vertical stems via a
+            second OffsetCurve pass — components again get no stem compensation.
+            A naively scaled component would lose weight on its vertical stems.
+            Leaving them untouched keeps composite glyphs internally consistent."""
+        comps_data = data.get("components")
+        if not comps_data:
+            return
+        try:
+            comps = list(layer.components)
+        except Exception:
+            return
+        for i, (name, tf) in enumerate(comps_data):
+            if i >= len(comps):
+                break
+            c = comps[i]
+            if tf is None:
+                continue
+            try:
+                c.transform = tf
+            except Exception:
+                pass
 
     # ── Background protection (images + paths in the Cmd+B layer) ───────────
     # Two cascade effects need to be neutralised so the Glyphs "background"
@@ -985,7 +1051,7 @@ class BolderDialog:
         f         = self.width_pct / 100.0
 
         for layer in self.layers:
-            data = self._orig[layer]
+            data = self._orig[self._key(layer)]
             img_state = self._snapshot_background_image(layer)
             try:
                 # Italic slant of this layer's master (0 when disabled / upright).
@@ -1078,6 +1144,10 @@ class BolderDialog:
             finally:
                 self._restore_background_image(layer, img_state)
                 self._restore_bg_paths(layer, data)
+                # Components are never transformed by Weightor — re-seat them
+                # from the snapshot so the applyTransform cascade above doesn't
+                # stretch or shift composite references. See _restore_components.
+                self._restore_components(layer, data)
 
         self._redraw()
         self._path_sig = self._compute_path_sig(self.layers)
@@ -1311,7 +1381,7 @@ class BolderDialog:
             pos = 0.5
 
         for layer in self.layers:
-            data = self._orig[layer]
+            data = self._orig[self._key(layer)]
             img_state = self._snapshot_background_image(layer)
             try:
                 # Italic slant of this layer's master (0 when disabled / upright).
@@ -1383,6 +1453,10 @@ class BolderDialog:
             finally:
                 self._restore_background_image(layer, img_state)
                 self._restore_bg_paths(layer, data)
+                # Components are never transformed by Weightor — re-seat them
+                # from the snapshot so the applyTransform cascade above doesn't
+                # stretch or shift composite references. See _restore_components.
+                self._restore_components(layer, data)
 
         self._redraw()
         self._path_sig = self._compute_path_sig(self.layers)
