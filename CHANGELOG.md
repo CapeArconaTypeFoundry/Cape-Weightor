@@ -1,6 +1,18 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v1.203] - 2026-06-09
+### Fixed
+- **Components are now fully protected in both modes.** The script never added or removed components, but `layer.applyTransform()` cascades onto every element of the layer — including components — so the slant/unslant, horizontal scale and Preserve-Height/Width rescales were silently stretching and shifting composite references. Two cascading problems followed from that:
+  - **Weight mode** added no weight to components (OffsetCurve only acts on outline paths), but the applyTransform steps still squashed them. Composite glyphs (`ñ`, `ä`, `Ω̃`, …) came out with un-thickened, mis-positioned references.
+  - **Width mode** condensed components horizontally without the closed-form vertical-stem compensation that the outline pipeline relies on — so the components' vertical stems lost weight, defeating the whole point of Width mode for composites.
+  - **Fix:** `_capture_layer` now snapshots each component's `transform` tuple, and both `_apply_weight` and `_apply_width` re-seat the components from that snapshot in their per-layer `finally` block — the same pattern already used for background images and background paths. `_restore` and `_restore_pristine` also restore the component transforms, so Reset and Cancel return composites to their true original state. Run Weightor on the **base glyphs** and the composites will inherit the change automatically through their references — the previous behaviour silently broke that workflow.
+- **Reset / Cancel now restore the correct original after navigating away and back.** The pristine snapshot was keyed by the live ObjC layer pointer, which Glyphs can replace with a fresh pointer when the same logical layer is re-selected (e.g. switching from `A` to `B` and back to `A`). The `if layer not in self._pristine` guard then missed the existing entry and re-snapshotted the *already-modified* working layer as the new "pristine" — so Reset and Cancel restored a corrupted baseline. The backup dictionaries (`_orig`, `_pristine`) are now keyed by the stable tuple `(glyph_name, masterId)`, the same identity used by the layer-change watcher, so a re-selected layer always hits its original pristine entry.
+- **Manual-edit detection now sees component moves.** The path fingerprint used to detect mid-session hand-edits only sampled node and anchor positions. Moving a component by hand was therefore not recognised and would have been overwritten by the next slider tick. Components (name + 6-float transform) are now part of the fingerprint, so manual component edits trigger the same new-baseline snapshot as node or anchor edits.
+
+### Internal
+- Removed the diagnostic stem-dump prints that ran on every dialog open (`font.stems` / `master.stems` introspection) — they only existed to debug the stem selector during Width-mode development.
+
 ## [v1.202] - 2026-06-01
 ### Fixed
 - **Background layer (Cmd+B) stays put — images *and* paths.** Two cascade effects neutralised in one `try / finally` block per layer:
