@@ -174,7 +174,7 @@ Compensation uses **one** stem value for the whole selection — the master's no
 weight_error = (1 − s) · (n − a)
 ```
 
-If `a = n` the result is exact. If `a > n` the stems end up a little too thin; if `a < n`, a little too thick. The effect grows with larger deviations and more extreme condensing/expansion. Treat the result as a strong starting point and touch up outliers by hand. Glyphs built only from components are scaled but **not** stem-compensated (OffsetCurve does not affect components), so composites will lose a little weight when condensed.
+If `a = n` the result is exact. If `a > n` the stems end up a little too thin; if `a < n`, a little too thick. The effect grows with larger deviations and more extreme condensing/expansion. Treat the result as a strong starting point and touch up outliers by hand. **Components are deliberately left untouched** — OffsetCurve cannot stem-compensate them, so naive scaling would just thin out their vertical stems. Run Width mode on the **base glyphs** instead; composite glyphs (`ñ`, `ä`, accented letters in general) inherit the new width automatically through their references.
 
 Glyphs that are essentially all stem (`l`, `i`, `|`) are left untouched in Width mode, since they cannot be made narrower without changing their weight.
 
@@ -188,10 +188,10 @@ Glyphs that are essentially all stem (`l`, `i`, `|`) are left untouched in Width
 - **Anchor X movement** is a proportional approximation based on the bounding box change, not on the glyph's internal stroke structure. Exception: anchors that sit exactly on a path node are snapped back to the exact new position of that node. For all other anchors the movement is an estimate. Disable **Move Anchors** if the automatic placement is not useful for a particular glyph.
 - **Preserve Outer Width** works by scaling the outline back into its original bounding box. This thickens the inside as intended, but stems become slightly thinner than a pure offset and round shapes a touch narrower. It cannot produce a true directional offset (outer flanks fixed at full offset thickness) — that needs master interpolation. On glyphs built only from components it has no visible effect, since components are not offset in the first place.
 - **The Cmd+B background layer stays put — both images and paths.** Reference images on the foreground layer (`layer.backgroundImage`) and on the Cmd+B background layer (`layer.background.backgroundImage`) keep their exact position, scale and rotation across every CAPE Weightor operation. The paths on the background layer are also re-seated after every per-layer pass: foreground LSB/RSB/width changes and applyTransform calls can cascade and shift those paths on X in some Glyphs versions, but the script restores them from the snapshot in a `try / finally`, so they never drift no matter how many slider changes you make.
-- **Components** are not affected — only paths in the active layer are modified. In **Width mode** components *are* scaled horizontally but cannot be stem-compensated, so composite glyphs lose a little weight when condensed.
+- **Components are never modified — in either mode.** Only the outline paths on the active layer are changed. OffsetCurve doesn't act on components, so anything that would translate, scale or shear them (italic unslant/reslant, horizontal scale in Width mode, Preserve Height / Preserve Outer Width rescales) is rolled back from a snapshot at the end of every per-layer pass. **Run Weightor on the base glyphs**; composite glyphs (`ñ`, `ä`, etc.) pick up the change automatically through their references, which is the only way to keep weight and width consistent on composites.
 - **Width mode** uses one nominal stem value for the whole selection. Glyphs whose real stem deviates from the master nominal (round shapes, diagonals, special characters) keep a small residual weight error — see [Per-glyph stem deviation](#per-glyph-stem-deviation-important).
-- The script works with **Glyphs 3.5+** and **Python 3.11** (Glyphs built-in).
 - For very large offset values, results can get messy. The slider range of ±10 is intentionally conservative — you can type larger values into the input fields, but use with caution.
+
 
 https://github.com/user-attachments/assets/538f25c9-c383-4467-b085-938aa477f3f1
 
@@ -200,12 +200,13 @@ https://github.com/user-attachments/assets/538f25c9-c383-4467-b085-938aa477f3f1
 ## Requirements
 
 - Glyphs 3.5 or later
-- Python 3 (built into Glyphs)
+- Python 3.11 (built into Glyphs)
 - `vanilla` (included with Glyphs)
 
 ---
 
 ## Written by
-Thomas Schostok
+Thomas Schostok & Claude
 
 *Cape Arcona Type Foundry — [www.capearcona.com](https://www.capearcona.com)*
+
