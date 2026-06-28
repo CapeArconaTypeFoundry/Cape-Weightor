@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.203 - 09-Jun-2026
+# Version 1.204 - 28-Jun-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
@@ -816,6 +816,21 @@ class BolderDialog:
         except Exception:
             pass
 
+        # Same for components living in the background layer — the foreground
+        # applyTransform cascade reaches them too, so we re-seat them afterwards.
+        bg_components = []
+        try:
+            bgl = layer.background
+            if bgl is not None:
+                for c in bgl.components:
+                    try:
+                        tf = tuple(c.transform)
+                    except Exception:
+                        tf = None
+                    bg_components.append((c.componentName, tf))
+        except Exception:
+            pass
+
         bg     = layer.background
         bounds = layer.bounds
         return {
@@ -825,6 +840,7 @@ class BolderDialog:
             "guides":       [(g.position.x, g.position.y, g.angle, g.name)
                              for g in layer.guides],
             "components":   components,
+            "bg_components": bg_components,
             "lsb":          layer.LSB,
             "rsb":          layer.RSB,
             "width":        layer.width,
@@ -868,6 +884,7 @@ class BolderDialog:
                     bg.shapes.remove(path)
                 for p in data["bg_paths"]:
                     bg.shapes.append(p.copy())
+            self._restore_bg_components(layer, data)
 
     def _restore_pristine(self):
         """Restore the true original state captured before Weightor touched anything."""
@@ -998,6 +1015,33 @@ class BolderDialog:
                 bg.shapes.append(p.copy())
         except Exception:
             pass
+
+    def _restore_bg_components(self, layer, data):
+        """Re-seat the background layer's components from their captured
+        transforms. The foreground applyTransform cascade translates/stretches
+        components in the background layer just like it does background paths,
+        so we restore them at the end of every per-layer pass. Same pattern as
+        _restore_components, but for the Cmd+B layer."""
+        comps_data = data.get("bg_components")
+        if not comps_data:
+            return
+        try:
+            bg = layer.background
+            if bg is None:
+                return
+            comps = list(bg.components)
+        except Exception:
+            return
+        for i, (name, tf) in enumerate(comps_data):
+            if i >= len(comps):
+                break
+            c = comps[i]
+            if tf is None:
+                continue
+            try:
+                c.transform = tf
+            except Exception:
+                pass
 
     # ── Apply (dispatch by mode) ─────────────────────────────────────────────
 
@@ -1144,6 +1188,7 @@ class BolderDialog:
             finally:
                 self._restore_background_image(layer, img_state)
                 self._restore_bg_paths(layer, data)
+                self._restore_bg_components(layer, data)
                 # Components are never transformed by Weightor — re-seat them
                 # from the snapshot so the applyTransform cascade above doesn't
                 # stretch or shift composite references. See _restore_components.
@@ -1453,6 +1498,7 @@ class BolderDialog:
             finally:
                 self._restore_background_image(layer, img_state)
                 self._restore_bg_paths(layer, data)
+                self._restore_bg_components(layer, data)
                 # Components are never transformed by Weightor — re-seat them
                 # from the snapshot so the applyTransform cascade above doesn't
                 # stretch or shift composite references. See _restore_components.
