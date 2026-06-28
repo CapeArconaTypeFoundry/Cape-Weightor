@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v1.204] - 2026-06-28
+### Fixed
+- **Components in the background layer (Cmd+B) now stay put too.** v1.203 protected foreground components and background *paths* / *images* from the `applyTransform` cascade, but components living in the background layer were never captured or restored — so changing Weight or Width silently translated and stretched them. `_capture_layer` now also snapshots each background component's `transform` tuple (`bg_components`), and the new `_restore_bg_components` re-seats them in both modes' per-layer `finally` block, alongside the existing background path/image restoration. `_restore` (Reset / Cancel) restores them as well, so the Cmd+B layer's components return to their true original state.
+
 ## [v1.203] - 2026-06-09
 ### Fixed
 - **Components are now fully protected in both modes.** The script never added or removed components, but `layer.applyTransform()` cascades onto every element of the layer — including components — so the slant/unslant, horizontal scale and Preserve-Height/Width rescales were silently stretching and shifting composite references. Two cascading problems followed from that:
