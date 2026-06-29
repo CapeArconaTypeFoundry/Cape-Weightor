@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.204 - 28-Jun-2026
+# Version 1.210 - 28-Jun-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
 
 __doc__ = """
-Adjusts the weight OR width of selected glyphs. In Weight mode it uses the OffsetCurve filter with independent X/Y offsets, outer/inner distribution and outer-width/height preservation. In Width mode it condenses or expands a glyph horizontally while keeping the vertical stem thickness constant (horizontal scale + closed-form stem compensation). Live preview with automatic glyph switching in the edit tab.
+Adjusts the weight OR width of selected glyphs. In Weight mode it uses the OffsetCurve filter with independent X/Y offsets, outer/inner distribution and outer-width/height preservation. In Width mode it condenses or expands a glyph horizontally while keeping the vertical stem thickness constant (horizontal scale + closed-form stem compensation). Live preview with automatic glyph switching in the edit tab. If you select individual paths in the edit view, only those paths are modified and the Preserve-Height/Width options are measured against the selection's bounding box; with no path selection the whole glyph is processed as before.
 """
 
 import json
@@ -313,6 +313,7 @@ class BolderDialog:
         # Start layer-change watcher (fires every 0.3 s on the main run loop)
         self._layer_sig = self._compute_layer_sig(self.layers)
         self._path_sig  = self._compute_path_sig(self.layers)
+        self._sel_sig   = self._compute_sel_sig(self.layers)
         self._timer = NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
             0.3, True, lambda t: self._check_layer_change()
         )
@@ -350,6 +351,115 @@ class BolderDialog:
             except Exception:
                 pass
         return hash(tuple(parts))
+
+    # ── Path-level selection (path mode) ─────────────────────────────────────
+
+    def _obj_key(self, obj):
+        """Stable, hashable identity for an ObjC object across PyObjC wrapper
+        instances. `layer.selection` and `layer.paths` can hand back different
+        Python wrappers for the same underlying GSPath, so a plain `id()` or
+        `is` test would miss the match. `objc.pyobjc_id` returns the underlying
+        object's address (identical for both wrappers); if it is unavailable we
+        fall back to the wrapper itself, which PyObjC hashes via the object's
+        identity-based `-hash` — also consistent for the same ObjC object."""
+        try:
+            return objc.pyobjc_id(obj)
+        except Exception:
+            return obj
+
+    def _selected_path_indices(self, layer):
+        """Tuple of layer.paths indices the user has selected in the edit view,
+        or None when the whole glyph should be processed.
+
+        Identity is by *index* (not object pointer) on purpose: every _apply()
+        rebuilds the paths from copies — and re-seats them in their original
+        order — so the index survives a restore/offset round-trip while a raw
+        object pointer would not. A path counts as selected when at least one of
+        its nodes is in layer.selection. Returns None when nothing path-like is
+        selected, or when *every* path is selected (Select All → whole-glyph, so
+        the usual sidebearing/anchor handling still runs)."""
+        try:
+            sel = list(layer.selection or [])
+        except Exception:
+            return None
+        if not sel:
+            return None
+        paths = list(layer.paths)
+        if not paths:
+            return None
+        key_to_idx = {self._obj_key(p): i for i, p in enumerate(paths)}
+        idxs = set()
+        for o in sel:
+            try:
+                if o.__class__.__name__ == "GSNode":
+                    par = o.parent
+                    if par is not None:
+                        i = key_to_idx.get(self._obj_key(par))
+                        if i is not None:
+                            idxs.add(i)
+            except Exception:
+                pass
+        if not idxs:
+            return None
+        if len(idxs) >= len(paths):
+            return None  # all paths selected → behave like whole-glyph mode
+        return tuple(sorted(idxs))
+
+    def _compute_sel_sig(self, layers):
+        """Fingerprint of the per-layer path selection, used by the watcher to
+        re-apply live when the user changes which paths are selected."""
+        return frozenset(
+            (self._key(l), self._selected_path_indices(l)) for l in layers
+        )
+
+    def _capture_sel_indices(self):
+        """Snapshot the current path selection *before* _restore() wipes it.
+        Stored as {layer_key: idx_tuple or None} and consulted by the per-layer
+        apply loops to decide path mode vs. whole-glyph mode."""
+        self._sel_indices = {
+            self._key(l): self._selected_path_indices(l) for l in self.layers
+        }
+
+    def _has_effect(self):
+        """True when the current settings actually change the outline."""
+        if self.mode == "width":
+            return abs(self.width_pct - 100.0) >= 1e-6
+        return self.value != 0 or self.value_y != 0
+
+    def _reselect_from_indices(self):
+        """Re-select the captured target paths after a restore that produced no
+        outline change (effect at 0), so picking paths never loses the selection."""
+        for layer in self.layers:
+            idxs = self._sel_indices.get(self._key(layer))
+            if not idxs:
+                continue
+            try:
+                cur = list(layer.paths)
+                sel = []
+                for i in idxs:
+                    if 0 <= i < len(cur):
+                        sel.extend(cur[i].nodes)
+                layer.selection = sel
+            except Exception:
+                pass
+
+    def _refresh_title(self):
+        """Window title with a path-mode indicator (number of targeted paths)."""
+        if len(self.layers) == 1:
+            base = f"CAPE Weightor: {self.layers[0].parent.name}"
+        else:
+            base = f"CAPE Weightor: {len(self.layers)} Glyphs"
+        n = 0
+        for l in self.layers:
+            idxs = self._selected_path_indices(l)
+            if idxs:
+                n += len(idxs)
+        if n:
+            base += f"  ·  {n} path{'s' if n != 1 else ''}"
+        try:
+            self.w.getNSWindow().setTitle_(base)
+        except Exception:
+            pass
 
     def _key(self, layer):
         """Stable backup-dict key — survives Glyphs handing us a fresh ObjC pointer
@@ -399,8 +509,17 @@ class BolderDialog:
             return
         new_sig = self._compute_layer_sig(new_layers)
         if new_sig == self._layer_sig:
-            # Same selection — watch for manual node edits on the active glyph(s)
+            # Same glyph(s) — watch for manual node edits first
             self._check_manual_edit()
+            # Then watch for a change of the path-level selection (path mode):
+            # selecting/deselecting paths re-scopes the effect and re-applies
+            # live — but only when there is an active effect, so merely picking
+            # paths with the sliders at 0 / 100 % never disturbs the selection.
+            new_sel = self._compute_sel_sig(self.layers)
+            if new_sel != self._sel_sig:
+                self._sel_sig = new_sel
+                if self._has_effect():
+                    self._apply()
             return
 
         # Reset the old layers to their original state
@@ -410,15 +529,10 @@ class BolderDialog:
         # Switch to the new selection and apply current values immediately
         self.layers     = new_layers
         self._layer_sig = new_sig
+        self._sel_sig   = self._compute_sel_sig(self.layers)
         self._save()
         self._apply()
-
-        # Update window title
-        if len(self.layers) == 1:
-            new_title = f"CAPE Weightor: {self.layers[0].parent.name}"
-        else:
-            new_title = f"CAPE Weightor: {len(self.layers)} Glyphs"
-        self.w.getNSWindow().setTitle_(new_title)
+        self._refresh_title()
 
     # ── Mode (Weight / Width) ────────────────────────────────────────────────
 
@@ -1046,10 +1160,178 @@ class BolderDialog:
     # ── Apply (dispatch by mode) ─────────────────────────────────────────────
 
     def _apply(self):
+        # Snapshot the path selection by index *before* the sub-method's
+        # _restore() rebuilds (and thereby clears) the live selection.
+        self._capture_sel_indices()
         if self.mode == "width":
             self._apply_width()
         else:
             self._apply_weight()
+
+    # ── Path-scoped processing (only selected paths) ─────────────────────────
+    # Strategy: reduce the layer to its selected paths, run a process function
+    # on that subset (so layer.bounds == the selection's bbox and
+    # layer.applyTransform only touches the selected paths), then rebuild the
+    # path list in its ORIGINAL order — selected results back in their slots,
+    # untouched ("frozen") paths verbatim. Original order matters: the index is
+    # our stable selection identity across restore/offset round-trips. After the
+    # rebuild the selected paths are re-selected so the scope stays visible and
+    # persists across slider drags (each drag clears the selection via restore).
+    # Glyph-wide metrics (sidebearings, width) and anchors have no meaning for a
+    # partial selection, so they are left untouched (anchors/guides restored).
+    # Components are re-seated by the caller's `finally` block as usual.
+
+    def _process_scoped(self, layer, idxs, process_fn):
+        idxset    = set(idxs)
+        all_paths = list(layer.paths)
+        n         = len(all_paths)
+        is_target = [i in idxset for i in range(n)]
+        target    = [all_paths[i] for i in idxs if 0 <= i < n]
+        frozen    = {i: all_paths[i].copy() for i in range(n) if i not in idxset}
+        if not target:
+            return
+
+        # Reduce to the selected paths and run the pipeline on them.
+        for p in all_paths:
+            layer.shapes.remove(p)
+        for p in target:
+            layer.shapes.append(p)
+
+        process_fn(layer)
+
+        # Rebuild in original order: targets back in their slots, frozen verbatim.
+        results = [p.copy() for p in layer.paths]
+        for p in list(layer.paths):
+            layer.shapes.remove(p)
+        ti = 0
+        for i in range(n):
+            if is_target[i]:
+                if ti < len(results):
+                    layer.shapes.append(results[ti])
+                    ti += 1
+            else:
+                layer.shapes.append(frozen[i])
+        # Path count changed (rare) → append any leftovers at the end.
+        while ti < len(results):
+            layer.shapes.append(results[ti])
+            ti += 1
+
+        # Re-select the targeted paths so the scope persists and stays visible.
+        try:
+            cur = list(layer.paths)
+            sel = []
+            for i in idxset:
+                if 0 <= i < len(cur):
+                    sel.extend(cur[i].nodes)
+            layer.selection = sel
+        except Exception:
+            pass
+
+        # Glyph-wide metrics/anchors untouched in path mode.
+        self._restore_anchors(layer)
+        self._restore_guides(layer)
+
+    def _weight_layer_scoped(self, layer, idxs, keep, pos):
+        keep_ital = bool(self.w.weight_italic.get())
+        angle = self._italic_angle(self._resolve_master(layer)) if keep_ital else 0.0
+        t     = math.tan(math.radians(angle)) if abs(angle) > 1e-6 else 0.0
+
+        def _proc(lyr):
+            if t:
+                lyr.applyTransform((1, 0, -t, 1, 0, 0))
+
+            up     = lyr.bounds
+            orig_x = up.origin.x
+            orig_y = up.origin.y
+            orig_w = up.size.width
+            orig_h = up.size.height
+
+            ok = self._offset_layer_distributed(lyr, self.value, self.value_y, keep, pos)
+            if ok:
+                # Preserve-height scoped to the selection's bounding box.
+                if self.w.preserve_h.get():
+                    nb = lyr.bounds
+                    if nb.size.height > 0 and orig_h > 0:
+                        try:
+                            strength = max(0.0, min(1.0, float(self.w.strength_field.get()) / 100.0))
+                        except ValueError:
+                            strength = 1.0
+                        s_full  = orig_h / nb.size.height
+                        ty_full = orig_y - nb.origin.y * s_full
+                        s  = 1.0 + (s_full  - 1.0) * strength
+                        ty =        ty_full          * strength
+                        lyr.applyTransform((1, 0, 0, s, 0, ty))
+                # Preserve-width scoped to the selection's bounding box.
+                if self.w.preserve_w.get() and orig_w > 0:
+                    nb = lyr.bounds
+                    if nb.size.width > 0:
+                        sx = orig_w / nb.size.width
+                        tx = orig_x - nb.origin.x * sx
+                        lyr.applyTransform((sx, 0, 0, 1, tx, 0))
+
+            if t:
+                lyr.applyTransform((1, 0, t, 1, 0, 0))
+
+        self._process_scoped(layer, idxs, _proc)
+
+    def _width_layer_scoped(self, layer, idxs, keep, keep_ital, f):
+        OffsetCurve = objc.lookUpClass("GlyphsFilterOffsetCurve")
+
+        angle = self._italic_angle(self._resolve_master(layer)) if keep_ital else 0.0
+        t     = math.tan(math.radians(angle)) if abs(angle) > 1e-6 else 0.0
+
+        def _proc(lyr):
+            if t:
+                lyr.applyTransform((1, 0, -t, 1, 0, 0))
+
+            up   = lyr.bounds
+            up_x = up.origin.x
+            up_w = up.size.width
+
+            n = self._stem_value_for_layer(lyr, self.width_stem_idx) \
+                if self.width_stem_idx is not None else 0.0
+
+            do_scale        = up_w > 0
+            s               = 1.0
+            offset_per_side = 0.0
+            if do_scale:
+                W        = up_w
+                W_target = W * f
+                if n <= 0:
+                    s = f
+                elif (W - n) > 0:
+                    s = (W_target - n) / (W - n)
+                    if s < 0.05:
+                        s = 0.05
+                    offset_per_side = n * (1.0 - s) / 2.0
+                else:
+                    do_scale = False
+
+            if do_scale:
+                tx = up_x * (1.0 - s)
+                lyr.applyTransform((s, 0, 0, 1, tx, 0))
+                if abs(offset_per_side) > 1e-6:
+                    applied = False
+                    try:
+                        OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_autoStroke_position_metrics_error_shadow_capStyleStart_capStyleEnd_keepCompatibleOutlines_(
+                            lyr, offset_per_side, 0.0,
+                            False, False, 0.5, None, None, None, 0, 0, keep
+                        )
+                        applied = True
+                    except AttributeError:
+                        pass
+                    if not applied:
+                        try:
+                            OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_position_(
+                                lyr, offset_per_side, 0.0, False, 0.5
+                            )
+                        except Exception as e:
+                            print(f"Width offset error ({lyr.parent.name}): {e}")
+
+            if t:
+                lyr.applyTransform((1, 0, t, 1, 0, 0))
+
+        self._process_scoped(layer, idxs, _proc)
 
     def _place_anchors(self, layer, data, orig_x, orig_w):
         """Move anchors to follow the horizontal change (proportional, with
@@ -1085,7 +1367,9 @@ class BolderDialog:
     def _apply_width(self):
         self._restore()
         if abs(self.width_pct - 100.0) < 1e-6:
+            self._reselect_from_indices()
             self._redraw()
+            self._refresh_title()
             self._path_sig = self._compute_path_sig(self.layers)
             return
 
@@ -1096,8 +1380,13 @@ class BolderDialog:
 
         for layer in self.layers:
             data = self._orig[self._key(layer)]
+            sel_idxs = self._sel_indices.get(self._key(layer))
             img_state = self._snapshot_background_image(layer)
             try:
+                if sel_idxs is not None:
+                    self._width_layer_scoped(layer, sel_idxs, keep, keep_ital, f)
+                    continue
+
                 # Italic slant of this layer's master (0 when disabled / upright).
                 angle = self._italic_angle(self._resolve_master(layer)) if keep_ital else 0.0
                 t     = math.tan(math.radians(angle)) if abs(angle) > 1e-6 else 0.0
@@ -1195,6 +1484,7 @@ class BolderDialog:
                 self._restore_components(layer, data)
 
         self._redraw()
+        self._refresh_title()
         self._path_sig = self._compute_path_sig(self.layers)
         print(f"Width: {self.width_pct:.0f}%  (scale {f:.3f})  keep_italic={keep_ital}")
 
@@ -1414,7 +1704,9 @@ class BolderDialog:
     def _apply_weight(self):
         self._restore()
         if self.value == 0 and self.value_y == 0:
+            self._reselect_from_indices()
             self._redraw()
+            self._refresh_title()
             self._path_sig = self._compute_path_sig(self.layers)
             return
 
@@ -1427,8 +1719,13 @@ class BolderDialog:
 
         for layer in self.layers:
             data = self._orig[self._key(layer)]
+            sel_idxs = self._sel_indices.get(self._key(layer))
             img_state = self._snapshot_background_image(layer)
             try:
+                if sel_idxs is not None:
+                    self._weight_layer_scoped(layer, sel_idxs, keep, pos)
+                    continue
+
                 # Italic slant of this layer's master (0 when disabled / upright).
                 angle = self._italic_angle(self._resolve_master(layer)) if keep_ital else 0.0
                 t     = math.tan(math.radians(angle)) if abs(angle) > 1e-6 else 0.0
@@ -1505,6 +1802,7 @@ class BolderDialog:
                 self._restore_components(layer, data)
 
         self._redraw()
+        self._refresh_title()
         self._path_sig = self._compute_path_sig(self.layers)
         print(f"X: {self.value}  Y: {self.value_y}  Position: {pos:.2f}  keep_italic={keep_ital}")
 

@@ -1,6 +1,14 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v1.210] - 2026-06-28
+### Added
+- **Path-level editing — modify only the selected paths.** If you select one or more paths (or any of their nodes) in the edit view, Weightor now applies Weight or Width to *those paths only* and leaves every other path in the glyph untouched. With no path selection — or with *all* paths selected (Select All) — the whole glyph is processed exactly as before. The window title shows a `· N paths` indicator while path mode is active. This works in both Weight and Width mode.
+  - **Preserve-Height / Preserve-Width are scoped to the selection.** In path mode the height/width that is held constant is measured against the bounding box of the *selected* paths, not the whole glyph.
+  - **Glyph-wide settings are intentionally left alone in path mode.** Sidebearings, the advance width, and anchors have no meaning for a partial selection, so they are not changed — only the outline of the selected paths moves.
+  - **Live, persistent scope.** Changing which paths are selected re-applies the effect to the new scope on the fly. Because each preview rebuilds the outline (which clears the edit-view selection), the targeted paths are re-selected after every update so the scope stays visible and survives slider drags. Selection identity is tracked by *path index* (captured before the rebuild and re-seated in the original order), which is stable across the restore/offset round-trip where a raw object pointer would not be.
+  - *Caveats:* path mode is only meaningful with a single active glyph in the edit tab (path selection is a per-glyph concept). The Outer/Inner **distribution** slider classifies contours among the selected subset only, so pushing it away from 50 % while a lone counter is selected can flip which side grows — at the default 50 % this is irrelevant.
+
 ## [v1.204] - 2026-06-28
 ### Fixed
 - **Components in the background layer (Cmd+B) now stay put too.** v1.203 protected foreground components and background *paths* / *images* from the `applyTransform` cascade, but components living in the background layer were never captured or restored — so changing Weight or Width silently translated and stretched them. `_capture_layer` now also snapshots each background component's `transform` tuple (`bg_components`), and the new `_restore_bg_components` re-seats them in both modes' per-layer `finally` block, alongside the existing background path/image restoration. `_restore` (Reset / Cancel) restores them as well, so the Cmd+B layer's components return to their true original state.
