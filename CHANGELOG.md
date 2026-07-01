@@ -1,6 +1,16 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v1.211] - 2026-07-01
+### Fixed
+- **Glyphs 4 compatibility — anchors are no longer dropped.** Under Glyphs 4 (Python 3.14 / newer PyObjC) the script raised `AttributeError: 'NSTaggedPointerString' object has no attribute 'position'` on any glyph that has anchors, and could delete those anchors in the process. Two changes fix this:
+  - **Anchor iteration.** `layer.anchors` is a name-keyed proxy; the newer PyObjC now yields the anchor *names* (strings) instead of the `GSAnchor` objects when iterating it directly. All four iteration sites now use `layer.anchors.values()`, which returns the anchor objects on both the old and new runtimes.
+  - **Explicit class imports.** `GSAnchor` and `GSGuide` are no longer auto-injected into the script namespace by Glyphs 4, so `_restore_anchors` / `_restore_guides` hit a `NameError` — and because `_restore_anchors` clears `layer.anchors` *before* recreating them, the error left the glyph with its anchors deleted. Both classes are now imported explicitly via `from GlyphsApp import GSAnchor, GSGuide`.
+  - The script now runs unchanged under **both Glyphs 4 (Python 3.14) and Glyphs 3 (Python 3.11)**.
+
+### Internal
+- Removed the per-tick diagnostic prints from Weight and Width mode (`X: … Position: … keep_italic=…` and `Width: …% keep_italic=…`). The `Dialog opened for …` line now includes the version number.
+
 ## [v1.210] - 2026-06-28
 ### Added
 - **Path-level editing — modify only the selected paths.** If you select one or more paths (or any of their nodes) in the edit view, Weightor now applies Weight or Width to *those paths only* and leaves every other path in the glyph untouched. With no path selection — or with *all* paths selected (Select All) — the whole glyph is processed exactly as before. The window title shows a `· N paths` indicator while path mode is active. This works in both Weight and Width mode.

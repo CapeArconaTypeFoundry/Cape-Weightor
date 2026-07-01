@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.210 - 28-Jun-2026
+# Version 1.211 - 01-Jul-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
@@ -17,11 +17,13 @@ import objc
 import vanilla
 from AppKit import NSApp, NSClickGestureRecognizer, NSEvent, NSPasteboard, NSPasteboardTypeString, NSScreen, NSTimer
 from Foundation import NSObject, NSPoint
+from GlyphsApp import GSAnchor, GSGuide
 
+VERSION    = "1.211"
 STEP       = 1
 STEP_SHIFT = 5
 WIN_W      = 270
-WIN_H      = 470
+WIN_H      = 480
 
 PREF_PREFIX          = "com.cape.makeMeBolder."
 PREF_VALUE           = PREF_PREFIX + "value"
@@ -318,7 +320,7 @@ class BolderDialog:
             0.3, True, lambda t: self._check_layer_change()
         )
 
-        print(f"Dialog opened for {title}.")
+        print(f"Dialog opened for {title.replace('CAPE Weightor', f'CAPE Weightor {VERSION}', 1)}.")
 
     # ── Layer watcher ──────────────────────────────────────────────────────
 
@@ -338,7 +340,7 @@ class BolderDialog:
                     for n in p.nodes:
                         parts.append(int(round(n.position.x)))
                         parts.append(int(round(n.position.y)))
-                for a in l.anchors:
+                for a in l.anchors.values():
                     parts.append(int(round(a.position.x)))
                     parts.append(int(round(a.position.y)))
                 for c in l.components:
@@ -905,7 +907,7 @@ class BolderDialog:
         """Snapshot a single layer's outlines, metrics, anchors, guides and components."""
         # Detect which anchors sit exactly on a node (path_idx, node_idx)
         anchor_nodes = {}
-        for anchor in layer.anchors:
+        for anchor in layer.anchors.values():
             ax, ay = round(anchor.position.x), round(anchor.position.y)
             for pi, path in enumerate(layer.paths):
                 for ni, node in enumerate(path.nodes):
@@ -949,7 +951,7 @@ class BolderDialog:
         bounds = layer.bounds
         return {
             "paths":        [p.copy() for p in layer.paths],
-            "anchors":      [(a.name, a.position.x, a.position.y) for a in layer.anchors],
+            "anchors":      [(a.name, a.position.x, a.position.y) for a in layer.anchors.values()],
             "anchor_nodes": anchor_nodes,
             "guides":       [(g.position.x, g.position.y, g.angle, g.name)
                              for g in layer.guides],
@@ -1342,7 +1344,7 @@ class BolderDialog:
         final_bbox   = layer.bounds
         orig_map     = {name: (ax, ay) for name, ax, ay in data["anchors"]}
         anchor_nodes = data.get("anchor_nodes", {})
-        for anchor in layer.anchors:
+        for anchor in layer.anchors.values():
             if anchor.name not in orig_map:
                 continue
             if anchor.name in anchor_nodes:
@@ -1486,7 +1488,6 @@ class BolderDialog:
         self._redraw()
         self._refresh_title()
         self._path_sig = self._compute_path_sig(self.layers)
-        print(f"Width: {self.width_pct:.0f}%  (scale {f:.3f})  keep_italic={keep_ital}")
 
     # ── Contour classification + distributed offset ──────────────────────────
 
@@ -1804,7 +1805,6 @@ class BolderDialog:
         self._redraw()
         self._refresh_title()
         self._path_sig = self._compute_path_sig(self.layers)
-        print(f"X: {self.value}  Y: {self.value_y}  Position: {pos:.2f}  keep_italic={keep_ital}")
 
     def _redraw(self):
         if self.font.currentTab:
