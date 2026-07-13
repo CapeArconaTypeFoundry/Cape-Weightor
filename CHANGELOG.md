@@ -1,6 +1,10 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v1.212] - 2026-07-09
+### Changed
+- **Faster live preview at the default Outer/Inner position (50 %).** When the distribution slider sits at 50 %, outer and inner contours receive the identical offset, so the expensive outer/inner contour classification (point-in-path tests against every other contour) and the two-pass filter rebuild are now skipped entirely — a single OffsetCurve run over the whole layer produces the same outline. As a side benefit, the original path order is preserved in this case (it used to be reordered to "all outer, then all inner"), which keeps outlines master-compatible for interpolation. Positions other than 50 % behave exactly as before.
+
 ## [v1.211] - 2026-07-01
 ### Fixed
 - **Glyphs 4 compatibility — anchors are no longer dropped.** Under Glyphs 4 (Python 3.14 / newer PyObjC) the script raised `AttributeError: 'NSTaggedPointerString' object has no attribute 'position'` on any glyph that has anchors, and could delete those anchors in the process. Two changes fix this:

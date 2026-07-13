@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.211 - 01-Jul-2026
+# Version 1.212 - 09-Jul-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
@@ -19,7 +19,7 @@ from AppKit import NSApp, NSClickGestureRecognizer, NSEvent, NSPasteboard, NSPas
 from Foundation import NSObject, NSPoint
 from GlyphsApp import GSAnchor, GSGuide
 
-VERSION    = "1.211"
+VERSION    = "1.212"
 STEP       = 1
 STEP_SHIFT = 5
 WIN_W      = 270
@@ -1641,15 +1641,6 @@ class BolderDialog:
         if not list(layer.paths):
             return True
 
-        outer_paths, inner_paths = self._classify_contours(layer)
-        outer_originals = [pp.copy() for pp in outer_paths]
-        inner_originals = [pp.copy() for pp in inner_paths]
-
-        # Per-group offsets. The doubling makes the sum equal 2·offset at any p,
-        # matching the per-side movement OffsetCurve produces at position 0.5.
-        f_outer = 2.0 * (1.0 - p)
-        f_inner = 2.0 * p
-
         OffsetCurve = objc.lookUpClass("GlyphsFilterOffsetCurve")
 
         def _do_offset(ox, oy):
@@ -1669,6 +1660,24 @@ class BolderDialog:
             except Exception as e:
                 print(f"Offset error ({layer.parent.name}): {e}")
                 return False
+
+        # Symmetric distribution (p = 0.5, the default): outer and inner would
+        # receive the identical offset, so the outer/inner split cannot change
+        # the result. Skip the O(n²) contour classification and the two-pass
+        # rebuild — a single filter run over the whole layer produces the same
+        # outline and, as a bonus, keeps the original path order intact
+        # (relevant for master compatibility).
+        if abs(p - 0.5) < 1e-6:
+            return _do_offset(offset_x, offset_y)
+
+        outer_paths, inner_paths = self._classify_contours(layer)
+        outer_originals = [pp.copy() for pp in outer_paths]
+        inner_originals = [pp.copy() for pp in inner_paths]
+
+        # Per-group offsets. The doubling makes the sum equal 2·offset at any p,
+        # matching the per-side movement OffsetCurve produces at position 0.5.
+        f_outer = 2.0 * (1.0 - p)
+        f_inner = 2.0 * p
 
         def _process(originals, fx, fy):
             """Replace layer.paths with `originals`, offset, return copies of the result."""
