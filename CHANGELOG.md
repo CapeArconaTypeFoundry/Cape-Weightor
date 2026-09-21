@@ -1,6 +1,15 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v1.213] - 2026-09-21
+### Fixed
+- **Stroke settings are no longer deleted.** Paths drawn as strokes (stroke palette: width, height, caps, position …) lost their stroke attributes as soon as Weightor ran, because the OffsetCurve filter rebuilds every path it touches. Stroke paths (any path with a `strokeWidth` attribute) are now taken off the layer while the filter runs and put back in their original slot, so all their settings are preserved.
+  - **Weight mode** grows the stroke thickness instead: `strokeWidth` by 2 × X offset and `strokeHeight` by 2 × Y offset — the same amount an outline stem receives. If X ≠ Y and the stroke has no explicit height, one is set. Reset / Cancel restore the original values.
+  - **Width mode** scales stroke paths horizontally but leaves their thickness alone (scaling doesn't change a stroke's rendered thickness, so no stem compensation is needed).
+
+### Internal
+- The OffsetCurve call (with its fallback for older Glyphs builds) now lives in a single helper, `_run_offset_filter`, instead of three copies.
+
 ## [v1.212] - 2026-07-09
 ### Changed
 - **Faster live preview at the default Outer/Inner position (50 %).** When the distribution slider sits at 50 %, outer and inner contours receive the identical offset, so the expensive outer/inner contour classification (point-in-path tests against every other contour) and the two-pass filter rebuild are now skipped entirely — a single OffsetCurve run over the whole layer produces the same outline. As a side benefit, the original path order is preserved in this case (it used to be reordered to "all outer, then all inner"), which keeps outlines master-compatible for interpolation. Positions other than 50 % behave exactly as before.
