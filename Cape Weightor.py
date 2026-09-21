@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.212 - 09-Jul-2026
+# Version 1.213 - 21-Sep-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
@@ -19,7 +19,7 @@ from AppKit import NSApp, NSClickGestureRecognizer, NSEvent, NSPasteboard, NSPas
 from Foundation import NSObject, NSPoint
 from GlyphsApp import GSAnchor, GSGuide
 
-VERSION    = "1.212"
+VERSION    = "1.213"
 STEP       = 1
 STEP_SHIFT = 5
 WIN_W      = 270
@@ -1277,8 +1277,6 @@ class BolderDialog:
         self._process_scoped(layer, idxs, _proc)
 
     def _width_layer_scoped(self, layer, idxs, keep, keep_ital, f):
-        OffsetCurve = objc.lookUpClass("GlyphsFilterOffsetCurve")
-
         angle = self._italic_angle(self._resolve_master(layer)) if keep_ital else 0.0
         t     = math.tan(math.radians(angle)) if abs(angle) > 1e-6 else 0.0
 
@@ -1313,22 +1311,7 @@ class BolderDialog:
                 tx = up_x * (1.0 - s)
                 lyr.applyTransform((s, 0, 0, 1, tx, 0))
                 if abs(offset_per_side) > 1e-6:
-                    applied = False
-                    try:
-                        OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_autoStroke_position_metrics_error_shadow_capStyleStart_capStyleEnd_keepCompatibleOutlines_(
-                            lyr, offset_per_side, 0.0,
-                            False, False, 0.5, None, None, None, 0, 0, keep
-                        )
-                        applied = True
-                    except AttributeError:
-                        pass
-                    if not applied:
-                        try:
-                            OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_position_(
-                                lyr, offset_per_side, 0.0, False, 0.5
-                            )
-                        except Exception as e:
-                            print(f"Width offset error ({lyr.parent.name}): {e}")
+                    self._offset_outlines_x(lyr, offset_per_side, keep)
 
             if t:
                 lyr.applyTransform((1, 0, t, 1, 0, 0))
@@ -1375,7 +1358,6 @@ class BolderDialog:
             self._path_sig = self._compute_path_sig(self.layers)
             return
 
-        OffsetCurve = objc.lookUpClass("GlyphsFilterOffsetCurve")
         keep      = bool(self.w.cleanup.get())
         keep_ital = bool(self.w.wmode_italic.get())
         f         = self.width_pct / 100.0
@@ -1439,23 +1421,10 @@ class BolderDialog:
 
                     # 2. Restore vertical-stem thickness with an X-only offset.
                     #    offsetY = 0 leaves horizontal stems (crossbars) untouched.
+                    #    Stroke paths are skipped: scaling doesn't change their
+                    #    rendered thickness, so they need no compensation.
                     if abs(offset_per_side) > 1e-6:
-                        applied = False
-                        try:
-                            OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_autoStroke_position_metrics_error_shadow_capStyleStart_capStyleEnd_keepCompatibleOutlines_(
-                                layer, offset_per_side, 0.0,
-                                False, False, 0.5, None, None, None, 0, 0, keep
-                            )
-                            applied = True
-                        except AttributeError:
-                            pass
-                        if not applied:
-                            try:
-                                OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_position_(
-                                    layer, offset_per_side, 0.0, False, 0.5
-                                )
-                            except Exception as e:
-                                print(f"Width offset error ({layer.parent.name}): {e}")
+                        self._offset_outlines_x(layer, offset_per_side, keep)
 
                 # 3. Reslant back to the original italic angle (identity when t == 0).
                 if t:
@@ -1488,6 +1457,112 @@ class BolderDialog:
         self._redraw()
         self._refresh_title()
         self._path_sig = self._compute_path_sig(self.layers)
+
+    # ── OffsetCurve filter + stroke paths ────────────────────────────────────
+    # Paths drawn as strokes (Glyphs stroke palette: path attributes
+    # strokeWidth / strokeHeight / lineCap… / strokePos) must never go through
+    # the OffsetCurve filter — it rebuilds them and drops those attributes.
+    # Instead they are taken off the layer while the filter runs, and in Weight
+    # mode their thickness attribute is grown by the same 2·offset an outline
+    # stem would receive. All other stroke settings are left as they are.
+
+    def _run_offset_filter(self, layer, ox, oy, keep):
+        """Run GlyphsFilterOffsetCurve on `layer`. Returns True on success."""
+        OffsetCurve = objc.lookUpClass("GlyphsFilterOffsetCurve")
+        try:
+            OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_autoStroke_position_metrics_error_shadow_capStyleStart_capStyleEnd_keepCompatibleOutlines_(
+                layer, ox, oy,
+                False, False, 0.5, None, None, None, 0, 0, keep
+            )
+            return True
+        except AttributeError:
+            pass
+        try:
+            OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_position_(
+                layer, ox, oy, False, 0.5
+            )
+            return True
+        except Exception as e:
+            print(f"Offset error ({layer.parent.name}): {e}")
+            return False
+
+    def _path_attr(self, path, key):
+        """Numeric path attribute (e.g. strokeWidth) or None."""
+        v = None
+        try:
+            v = path.attributes.get(key)
+        except Exception:
+            try:
+                v = path.attributeForKey_(key)
+            except Exception:
+                v = None
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _set_path_attr(self, path, key, value):
+        try:
+            path.setAttribute_forKey_(value, key)
+            return
+        except Exception:
+            pass
+        try:
+            path.attributes[key] = value
+        except Exception as e:
+            print(f"Could not set {key} on path: {e}")
+
+    def _is_stroke_path(self, path):
+        w = self._path_attr(path, "strokeWidth")
+        return w is not None and w > 0
+
+    def _thicken_strokes(self, layer, dx, dy):
+        """Grow the stroke thickness of stroke paths by 2·offset (X → strokeWidth,
+        Y → strokeHeight), matching what OffsetCurve does to outline stems."""
+        for path in layer.paths:
+            w = self._path_attr(path, "strokeWidth")
+            if w is None or w <= 0:
+                continue
+            h = self._path_attr(path, "strokeHeight")
+            self._set_path_attr(path, "strokeWidth", round(max(1.0, w + 2.0 * dx), 2))
+            if h is not None and h > 0:
+                self._set_path_attr(path, "strokeHeight", round(max(1.0, h + 2.0 * dy), 2))
+            elif abs(dx - dy) > 1e-6:
+                # No explicit height = same as width; X ≠ Y needs an explicit one.
+                self._set_path_attr(path, "strokeHeight", round(max(1.0, w + 2.0 * dy), 2))
+
+    def _offset_outlines_x(self, layer, amount, keep):
+        """Width-mode stem compensation: X-only offset of the outline paths."""
+        def _fn(lyr):
+            if list(lyr.paths):
+                self._run_offset_filter(lyr, amount, 0.0, keep)
+        self._with_outline_paths_only(layer, _fn)
+
+    def _with_outline_paths_only(self, layer, fn):
+        """Call fn(layer) with the stroke paths temporarily removed from the
+        layer, then put them back in their original slots. Returns fn's result."""
+        all_paths = list(layer.paths)
+        strokes = {i: p for i, p in enumerate(all_paths) if self._is_stroke_path(p)}
+        if not strokes:
+            return fn(layer)
+        for p in strokes.values():
+            layer.shapes.remove(p)
+        try:
+            return fn(layer)
+        finally:
+            outlines = [p.copy() for p in layer.paths]
+            for p in list(layer.paths):
+                layer.shapes.remove(p)
+            oi = 0
+            for i in range(len(all_paths)):
+                if i in strokes:
+                    layer.shapes.append(strokes[i])
+                elif oi < len(outlines):
+                    layer.shapes.append(outlines[oi])
+                    oi += 1
+            # Outline count changed (rare) → append leftovers at the end.
+            for p in outlines[oi:]:
+                layer.shapes.append(p)
 
     # ── Contour classification + distributed offset ──────────────────────────
 
@@ -1641,25 +1716,22 @@ class BolderDialog:
         if not list(layer.paths):
             return True
 
-        OffsetCurve = objc.lookUpClass("GlyphsFilterOffsetCurve")
+        # Stroke paths: grow the stroke thickness attribute, then offset only the
+        # outline paths (the filter would otherwise wipe the stroke settings).
+        self._thicken_strokes(layer, offset_x, offset_y)
+        return self._with_outline_paths_only(
+            layer,
+            lambda lyr: self._offset_outlines_distributed(lyr, offset_x, offset_y, keep, p)
+        )
+
+    def _offset_outlines_distributed(self, layer, offset_x, offset_y, keep, p):
+        """Outer/inner-distributed offset of the layer's (outline) paths.
+        See _offset_layer_distributed."""
+        if not list(layer.paths):
+            return True
 
         def _do_offset(ox, oy):
-            try:
-                OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_autoStroke_position_metrics_error_shadow_capStyleStart_capStyleEnd_keepCompatibleOutlines_(
-                    layer, ox, oy,
-                    False, False, 0.5, None, None, None, 0, 0, keep
-                )
-                return True
-            except AttributeError:
-                pass
-            try:
-                OffsetCurve.offsetLayer_offsetX_offsetY_makeStroke_position_(
-                    layer, ox, oy, False, 0.5
-                )
-                return True
-            except Exception as e:
-                print(f"Offset error ({layer.parent.name}): {e}")
-                return False
+            return self._run_offset_filter(layer, ox, oy, keep)
 
         # Symmetric distribution (p = 0.5, the default): outer and inner would
         # receive the identical offset, so the outer/inner split cannot change
