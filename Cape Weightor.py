@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 #
 # CAPE Weightor
-# Version 1.213 - 21-Sep-2026
+# Version 1.214 - 13-Nov-2026
 #
 # Cape Arcona Type Foundry
 # Written by Thomas Schostok
@@ -19,7 +19,7 @@ from AppKit import NSApp, NSClickGestureRecognizer, NSEvent, NSPasteboard, NSPas
 from Foundation import NSObject, NSPoint
 from GlyphsApp import GSAnchor, GSGuide
 
-VERSION    = "1.213"
+VERSION    = "1.214"
 STEP       = 1
 STEP_SHIFT = 5
 WIN_W      = 270
@@ -951,6 +951,7 @@ class BolderDialog:
         bounds = layer.bounds
         return {
             "paths":        [p.copy() for p in layer.paths],
+            "hints":        self._capture_hints(layer),
             "anchors":      [(a.name, a.position.x, a.position.y) for a in layer.anchors.values()],
             "anchor_nodes": anchor_nodes,
             "guides":       [(g.position.x, g.position.y, g.angle, g.name)
@@ -964,6 +965,76 @@ class BolderDialog:
             "bounds_w":     bounds.size.width,
             "bg_paths":     [p.copy() for p in bg.paths] if bg else [],
         }
+
+    # ── Hints (corner / cap / segment components, PS + TT hints) ─────────────
+    # Glyphs stores corner components & co. as GSHint objects on the layer, not
+    # as shapes. A hint points at its node(s) by index, and it is dropped or
+    # left dangling when that node's path is removed — which is exactly what
+    # every restore and every OffsetCurve run does. On top of that,
+    # layer.applyTransform() scales the hint itself. So hints are snapshotted
+    # (a copy plus the path/node index of every node they reference), taken
+    # off the layer while the outline is processed, and re-seated afterwards.
+    # Like components, they are never modified by Weightor.
+
+    _HINT_NODE_ATTRS = ("originNode", "targetNode", "otherNode1", "otherNode2")
+
+    def _capture_hints(self, layer):
+        out = []
+        try:
+            hints = list(layer.hints)
+        except Exception:
+            return out
+        if not hints:
+            return out
+        paths = list(layer.paths)
+        for h in hints:
+            locs = {}
+            for attr in self._HINT_NODE_ATTRS:
+                try:
+                    node = getattr(h, attr)
+                    if node is None:
+                        continue
+                    parent = node.parent
+                    for pi, path in enumerate(paths):
+                        if path == parent:
+                            locs[attr] = (pi, list(path.nodes).index(node))
+                            break
+                except Exception:
+                    pass
+            try:
+                out.append((h.copy(), locs))
+            except Exception:
+                pass
+        return out
+
+    def _strip_hints(self, layer, data):
+        """Take the hints off the layer while its outline is being processed,
+        so applyTransform / OffsetCurve cannot deform or orphan them."""
+        if not data.get("hints"):
+            return
+        try:
+            layer.hints = []
+        except Exception:
+            pass
+
+    def _restore_hints(self, layer, data):
+        """Re-seat the snapshotted hints and re-attach them to their nodes
+        (by path index + node index, so it survives rebuilt paths)."""
+        hints_data = data.get("hints")
+        if not hints_data:
+            return
+        try:
+            fresh = [(h.copy(), locs) for h, locs in hints_data]
+            layer.hints = [h for h, _ in fresh]
+            paths = list(layer.paths)
+            for h, locs in fresh:
+                for attr, (pi, ni) in locs.items():
+                    try:
+                        setattr(h, attr, paths[pi].nodes[ni])
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"Could not restore hints ({layer.parent.name}): {e}")
 
     def _save(self):
         self._orig = {}
@@ -982,25 +1053,29 @@ class BolderDialog:
     def _restore(self, source=None):
         src = source if source is not None else self._orig
         for layer in self.layers:
-            k = self._key(layer)
-            if k not in src:
-                continue
-            data = src[k]
-            for path in list(layer.paths):
-                layer.shapes.remove(path)
-            for p in data["paths"]:
-                layer.shapes.append(p.copy())
-            layer.width = data["width"]
-            self._restore_anchors(layer, src)
-            self._restore_guides(layer, src)
-            self._restore_components(layer, data)
-            bg = layer.background
-            if bg and data["bg_paths"]:
-                for path in list(bg.paths):
-                    bg.shapes.remove(path)
-                for p in data["bg_paths"]:
-                    bg.shapes.append(p.copy())
-            self._restore_bg_components(layer, data)
+            if self._key(layer) in src:
+                self._restore_layer(layer, src)
+
+    def _restore_layer(self, layer, source=None):
+        """Put a single layer back to its snapshot state."""
+        src  = source if source is not None else self._orig
+        data = src[self._key(layer)]
+        for path in list(layer.paths):
+            layer.shapes.remove(path)
+        for p in data["paths"]:
+            layer.shapes.append(p.copy())
+        self._restore_hints(layer, data)
+        layer.width = data["width"]
+        self._restore_anchors(layer, src)
+        self._restore_guides(layer, src)
+        self._restore_components(layer, data)
+        bg = layer.background
+        if bg and data["bg_paths"]:
+            for path in list(bg.paths):
+                bg.shapes.remove(path)
+            for p in data["bg_paths"]:
+                bg.shapes.append(p.copy())
+        self._restore_bg_components(layer, data)
 
     def _restore_pristine(self):
         """Restore the true original state captured before Weightor touched anything."""
@@ -1318,13 +1393,43 @@ class BolderDialog:
 
         self._process_scoped(layer, idxs, _proc)
 
-    def _place_anchors(self, layer, data, orig_x, orig_w):
+    def _first_node_x(self, layer):
+        try:
+            for path in layer.paths:
+                for node in path.nodes:
+                    return node.position.x
+        except Exception:
+            pass
+        return None
+
+    def _outline_box(self, layer):
+        """(x, width, first-node x) of the layer's bbox. Call while the hints
+        are off the layer, so corner components don't count."""
+        b = layer.bounds
+        return (b.origin.x, b.size.width, self._first_node_x(layer))
+
+    def _shifted_outline_box(self, layer, box):
+        """`box` from _outline_box, moved along with whatever the sidebearing /
+        width setters did to the outline since. Returns (x, width)."""
+        x, w, ref = box
+        now = self._first_node_x(layer)
+        if ref is not None and now is not None:
+            x += now - ref
+        return (x, w)
+
+    def _place_anchors(self, layer, data, orig_x, orig_w, final=None):
         """Move anchors to follow the horizontal change (proportional, with
-        node-snapping), keeping their original Y. Honors the Move anchors box."""
+        node-snapping), keeping their original Y. Honors the Move anchors box.
+        `final` is the processed outline's (x, width); defaults to layer.bounds.
+        Anchors outside the outline's horizontal extent (e.g. at the tip of a
+        corner-component serif) keep their distance to the nearest edge."""
         if not self.w.move_anchors.get():
             self._restore_anchors(layer)
             return
-        final_bbox   = layer.bounds
+        if final is None:
+            fb = layer.bounds
+            final = (fb.origin.x, fb.size.width)
+        final_x, final_w = final
         orig_map     = {name: (ax, ay) for name, ax, ay in data["anchors"]}
         anchor_nodes = data.get("anchor_nodes", {})
         for anchor in layer.anchors.values():
@@ -1340,9 +1445,13 @@ class BolderDialog:
                 except (IndexError, AttributeError):
                     pass
             orig_ax, orig_ay = orig_map[anchor.name]
-            if orig_w > 0 and final_bbox.size.width > 0:
-                s_x      = final_bbox.size.width / orig_w
-                anchor.x = final_bbox.origin.x + (orig_ax - orig_x) * s_x
+            if orig_w > 0 and final_w > 0:
+                if orig_ax < orig_x:
+                    anchor.x = final_x + (orig_ax - orig_x)
+                elif orig_ax > orig_x + orig_w:
+                    anchor.x = final_x + final_w + (orig_ax - orig_x - orig_w)
+                else:
+                    anchor.x = final_x + (orig_ax - orig_x) * final_w / orig_w
             else:
                 anchor.x = orig_ax
             anchor.y = orig_ay
@@ -1367,6 +1476,9 @@ class BolderDialog:
             sel_idxs = self._sel_indices.get(self._key(layer))
             img_state = self._snapshot_background_image(layer)
             try:
+                # Corner components & co. are off the layer while the outline
+                # is processed; re-seated below (and in `finally`).
+                self._strip_hints(layer, data)
                 if sel_idxs is not None:
                     self._width_layer_scoped(layer, sel_idxs, keep, keep_ital, f)
                     continue
@@ -1411,8 +1523,16 @@ class BolderDialog:
                         offset_per_side = n * (1.0 - s) / 2.0
                     else:
                         # Essentially all stem (l, i, |) — cannot narrow without
-                        # changing weight; leave untouched (still reslant below).
+                        # changing weight; leave untouched.
                         do_scale = False
+
+                if not do_scale:
+                    # Nothing to change: put the layer back to its snapshot in
+                    # one clean pass (this also undoes the unslant) instead of
+                    # re-seating hints onto an outline that was never rebuilt —
+                    # corner components then show up as broken (red marker).
+                    self._restore_layer(layer)
+                    continue
 
                 if do_scale:
                     # 1. Horizontal scale, upright left edge pinned
@@ -1430,6 +1550,12 @@ class BolderDialog:
                 if t:
                     layer.applyTransform((1, 0, t, 1, 0, 0))
 
+                # Corner components back on before metrics are set — they
+                # count towards the sidebearings. The outline-only bbox is
+                # taken first, as the reference for anchor placement.
+                out_box = self._outline_box(layer)
+                self._restore_hints(layer, data)
+
                 if do_scale:
                     # 4. Sidebearings
                     if self.w.wmode_adj_sb.get():
@@ -1443,9 +1569,12 @@ class BolderDialog:
                         layer.RSB = data["rsb"] * f
 
                 # 5. Anchors follow the horizontal change; guides restored
-                self._place_anchors(layer, data, osl_x, osl_w)
+                self._place_anchors(layer, data, osl_x, osl_w,
+                                    self._shifted_outline_box(layer, out_box))
                 self._restore_guides(layer)
             finally:
+                if not len(layer.hints):
+                    self._restore_hints(layer, data)   # scoped / bail-out paths
                 self._restore_background_image(layer, img_state)
                 self._restore_bg_paths(layer, data)
                 self._restore_bg_components(layer, data)
@@ -1804,6 +1933,9 @@ class BolderDialog:
             sel_idxs = self._sel_indices.get(self._key(layer))
             img_state = self._snapshot_background_image(layer)
             try:
+                # Corner components & co. are off the layer while the outline
+                # is processed; re-seated below (and in `finally`).
+                self._strip_hints(layer, data)
                 if sel_idxs is not None:
                     self._weight_layer_scoped(layer, sel_idxs, keep, pos)
                     continue
@@ -1864,6 +1996,12 @@ class BolderDialog:
                 if t:
                     layer.applyTransform((1, 0, t, 1, 0, 0))
 
+                # Corner components back on before metrics are set — they
+                # count towards the sidebearings. The outline-only bbox is
+                # taken first, as the reference for anchor placement.
+                out_box = self._outline_box(layer)
+                self._restore_hints(layer, data)
+
                 # Width / sidebearings
                 if self.w.preserve_w.get():
                     layer.width = data["width"]
@@ -1872,9 +2010,12 @@ class BolderDialog:
                     layer.RSB = data["rsb"]
 
                 # Anchors + guides (use slanted reference bbox)
-                self._place_anchors(layer, data, osl_x, osl_w)
+                self._place_anchors(layer, data, osl_x, osl_w,
+                                    self._shifted_outline_box(layer, out_box))
                 self._restore_guides(layer)
             finally:
+                if not len(layer.hints):
+                    self._restore_hints(layer, data)   # scoped / bail-out paths
                 self._restore_background_image(layer, img_state)
                 self._restore_bg_paths(layer, data)
                 self._restore_bg_components(layer, data)
