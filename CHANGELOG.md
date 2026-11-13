@@ -1,6 +1,14 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v1.214] - 2026-11-13
+### Fixed
+- **Corner components are no longer deformed.** Glyphs stores corner components (and cap / segment components, PS / TT hints) as *hints* on the layer, attached to a node by index — not as shapes. Weightor replaced the paths on every preview and on Reset / Cancel but left the hints behind, attached to nodes that no longer existed, and `applyTransform` additionally scaled the hint itself. The result was a distorted corner that stayed distorted even after Cancel. `_capture_layer` now snapshots the layer's hints together with the path / node index of every node they reference; they are taken off the layer while the outline is processed and re-seated on the rebuilt nodes afterwards (`_capture_hints`, `_strip_hints`, `_restore_hints`). Reset / Cancel restore them as well.
+  - Like components, corner components are **never modified** by Weightor: the corner artwork keeps its original size in both Weight and Width mode. Adjust the `_corner.*` glyph itself if it should follow.
+  - **Width mode on all-stem glyphs (I, l, |).** When a glyph cannot be condensed or expanded without changing its weight, the layer is now simply put back to its snapshot in one pass (new `_restore_layer`) instead of running through the strip / re-seat cycle on an outline that was never rebuilt, which made the corner components disappear behind a red marker.
+  - **Anchors no longer wander on glyphs with corner components.** *Move anchors* compared the outline's bounding box before processing (corner components off) with the one after (corner components back on), so anchors were scaled by the wrong factor. Both boxes are now outline-only. In addition, anchors that sit *outside* the outline's horizontal extent (e.g. at the tip of a serif) now keep their distance to the nearest outline edge instead of being extrapolated.
+  - *Caveat:* hints are re-attached by path and node index. If a run changes the node structure (*Keep node count* off) or the path order (Outer/Inner position other than 50 % on multi-contour glyphs), a corner can end up on a neighbouring node in the preview. Reset / Cancel always restore it correctly.
+
 ## [v1.213] - 2026-09-21
 ### Fixed
 - **Stroke settings are no longer deleted.** Paths drawn as strokes (stroke palette: width, height, caps, position …) lost their stroke attributes as soon as Weightor ran, because the OffsetCurve filter rebuilds every path it touches. Stroke paths (any path with a `strokeWidth` attribute) are now taken off the layer while the filter runs and put back in their original slot, so all their settings are preserved.
